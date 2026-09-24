@@ -1,0 +1,622 @@
+// ============================================================================
+//  Arduino Opta – mapovanie a test relé / vstupov cez Serial Monitor
+//
+//  - 4 interné relé Opty (R1..R4)
+//  - 8 vstupov Opty (I1..I8 = A0..A7)
+//  - externý relé modul na RS485 (Modbus RTU), kanály X1..Xn
+//
+//  Knižnice (Library Manager): ArduinoRS485, ArduinoModbus
+//  Doska: Arduino Mbed OS Opta Boards -> Opta
+//  Serial Monitor: 115200 baud, koniec riadku "Newline" (alebo "Both NL & CR")
+//
+//  Napíš `help` pre zoznam príkazov.
+//
+//  Všetky príkazy idú cez handleCommand(line, out) – neskôr ten istý
+//  handler použijeme pre sieťové rozhranie (HTTP / MQTT).
+// ============================================================================
+
+#include <ArduinoRS485.h>
+#include <ArduinoModbus.h>
+#include "config.h"
+
+// ---------------------------------------------------------------------------
+//  Hardvér Opty
+// ---------------------------------------------------------------------------
+const int RELAY_PINS[4]  = {D0, D1, D2, D3};
+const int RELAY_LEDS[4]  = {LED_D0, LED_D1, LED_D2, LED_D3};
+const int INPUT_PINS[8]  = {A0, A1, A2, A3, A4, A5, A6, A7};
+
+const int EXT_COUNT = RELAY_MODULE_COUNT;
+const int EXT_NAMES_COUNT = sizeof(EXT_RELAY_NAMES) / sizeof(EXT_RELAY_NAMES[0]);
+
+// ---------------------------------------------------------------------------
+//  Stav
+// ---------------------------------------------------------------------------
+bool intState[4] = {false, false, false, false};
+bool extState[32] = {false};
+bool extKnown = false;          // či extState zodpovedá realite (po úspešnom čítaní/zápise)
+
+bool  inState[8] = {false};
+float inVolt[8]  = {0};
+bool  btnState  = false;
+
+bool watchMode = false;
+unsigned long lastWatch = 0;
+
+unsigned long mbBaud = MODBUS_BAUD;
+int  mbId = RELAY_MODULE_ID;
+bool mbStarted = false;
+
+char lineBuf[96];
+size_t lineLen = 0;
+
+// ---------------------------------------------------------------------------
+//  Pomocné
+// ---------------------------------------------------------------------------
+const char* extName(int i) {  // i = 0-based
+  return (i < EXT_NAMES_COUNT) ? EXT_RELAY_NAMES[i] : "?";
+}
+
+const char* onOff(bool v) { return v ? "ON " : "OFF"; }
+
+bool isTimeoutError() {
+  const char* e = ModbusRTUClient.lastError();
+  return e == nullptr || strstr(e, "imed out") != nullptr;
+}
+
+void printMbError(Print& out) {
+  out.print(F("  ! Modbus chyba: "));
+  const char* e = ModbusRTUClient.lastError();
+  out.println(e ? e : "(nezname)");
+}
+
+// Preruší blokujúcu akciu (walk/scan), ak používateľ niečo pošle
+bool abortRequested() {
+  if (Serial.available()) {
+    while (Serial.available()) Serial.read();
+    return true;
+  }
+  return false;
+}
+
+// Čakanie, ktoré sa dá prerušiť; vráti true pri prerušení
+bool waitOrAbort(unsigned long ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    if (abortRequested()) return true;
+    delay(5);
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+//  Modbus
+// ---------------------------------------------------------------------------
+bool modbusBegin(unsigned long baud) {
+  if (mbStarted) {
+    ModbusRTUClient.end();
+    mbStarted = false;
+  }
+  // Oneskorenia podľa odporúčania Arduino pre Optu (3.5 znaku)
+  float bitDuration = 1.0f / baud;
+  int d = (int)(bitDuration * 9.6f * 3.5f * 1e6f);
+  RS485.setDelays(d, d);
+
+  if (!ModbusRTUClient.begin(baud, MODBUS_SERIAL_CONFIG)) {
+    return false;
+  }
+  ModbusRTUClient.setTimeout(MODBUS_TIMEOUT_MS);
+  mbBaud = baud;
+  mbStarted = true;
+  extKnown = false;
+  return true;
+}
+
+bool extWrite(int ch, bool on, Print& out) {  // ch = 1-based
+  int addr = RELAY_COIL_OFFSET + ch - 1;
+  if (!ModbusRTUClient.coilWrite(mbId, addr, on ? 1 : 0)) {
+    out.print(F("  ! X")); out.print(ch); out.println(F(": zapis zlyhal"));
+    printMbError(out);
+    return false;
+  }
+  extState[ch - 1] = on;
+  return true;
+}
+
+bool extReadAll(Print& out) {
+  if (!ModbusRTUClient.requestFrom(mbId, COILS, RELAY_COIL_OFFSET, EXT_COUNT)) {
+    out.println(F("  ! Citanie stavu externeho modulu zlyhalo"));
+    printMbError(out);
+    extKnown = false;
+    return false;
+  }
+  for (int i = 0; i < EXT_COUNT; i++) {
+    extState[i] = ModbusRTUClient.read() != 0;
+  }
+  extKnown = true;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+//  Interné relé
+// ---------------------------------------------------------------------------
+void intWrite(int ch, bool on) {  // ch = 1-based
+  digitalWrite(RELAY_PINS[ch - 1], on ? HIGH : LOW);
+  digitalWrite(RELAY_LEDS[ch - 1], on ? HIGH : LOW);
+  intState[ch - 1] = on;
+}
+
+// ---------------------------------------------------------------------------
+//  Vstupy
+// ---------------------------------------------------------------------------
+float readInputVoltage(int i) {
+  int raw = analogRead(INPUT_PINS[i]);
+  // Škálovanie podľa Arduino dokumentácie Opty (12-bit ADC, delič 0.3034)
+  return raw * (3.249f / 4095.0f) / 0.3034f;
+}
+
+// Vráti bitovú masku vstupov, ktoré zmenili stav (bit 8 = tlačidlo USER)
+uint16_t updateInputs() {
+  uint16_t changed = 0;
+  for (int i = 0; i < 8; i++) {
+    float v = readInputVoltage(i);
+    inVolt[i] = v;
+    bool s = inState[i];
+    if (!s && v >= INPUT_ON_V) s = true;
+    else if (s && v <= INPUT_OFF_V) s = false;
+    if (s != inState[i]) {
+      inState[i] = s;
+      changed |= (1 << i);
+    }
+  }
+#ifdef BTN_USER
+  bool b = digitalRead(BTN_USER) == LOW;  // stlačené = LOW
+  if (b != btnState) {
+    btnState = b;
+    changed |= (1 << 8);
+  }
+#endif
+  return changed;
+}
+
+// ---------------------------------------------------------------------------
+//  Výpisy
+// ---------------------------------------------------------------------------
+void printInternal(Print& out) {
+  out.println(F("Interne rele (Opta):"));
+  for (int i = 0; i < 4; i++) {
+    out.print(F("  R")); out.print(i + 1); out.print(F("  "));
+    out.print(onOff(intState[i])); out.print(F("  "));
+    out.println(INTERNAL_RELAY_NAMES[i]);
+  }
+}
+
+void printExternal(Print& out, bool refresh) {
+  out.print(F("Externy modul (ID ")); out.print(mbId);
+  out.print(F(", ")); out.print(mbBaud); out.println(F(" baud):"));
+  if (refresh) extReadAll(out);
+  for (int i = 0; i < EXT_COUNT; i++) {
+    out.print(F("  X")); out.print(i + 1); out.print(i + 1 < 10 ? F("  ") : F(" "));
+    out.print(extKnown ? onOff(extState[i]) : "???"); out.print(F("  "));
+    out.println(extName(i));
+  }
+}
+
+void printInputs(Print& out) {
+  updateInputs();
+  out.println(F("Vstupy (Opta):"));
+  for (int i = 0; i < 8; i++) {
+    out.print(F("  I")); out.print(i + 1); out.print(F("  "));
+    out.print(onOff(inState[i])); out.print(F("  "));
+    out.print(inVolt[i], 2); out.print(F(" V  "));
+    out.println(INPUT_NAMES[i]);
+  }
+#ifdef BTN_USER
+  out.print(F("  USER tlacidlo: ")); out.println(btnState ? F("stlacene") : F("uvolnene"));
+#endif
+}
+
+void printHelp(Print& out) {
+  out.println(F(
+    "\n=== Opta relay test – prikazy ===\n"
+    "  help                      tento zoznam\n"
+    "  status                    stav vsetkeho (interne, externe, vstupy)\n"
+    "\n"
+    "  r <1-4|all> <on|off|t>    interne rele Opty (t = prepni)\n"
+    "  r <1-4> p [ms]            impulz (default 500 ms)\n"
+    "  x <1-N|all> <on|off|t>    externe rele na RS485 module\n"
+    "  x <1-N> p [ms]            impulz\n"
+    "  x                         precitaj stav externeho modulu\n"
+    "  off                       VSETKO vypnut (interne aj externe)\n"
+    "\n"
+    "  in                        vypis vstupov (stav + napatie)\n"
+    "  watch                     zap/vyp priebezny vypis zmien vstupov\n"
+    "\n"
+    "  walk r | walk x           postupne zopne kazde rele (na identifikaciu)\n"
+    "                            lubovolny znak = prerusit\n"
+    "\n"
+    "  mb                        aktualne Modbus nastavenia\n"
+    "  id <n>                    zmen Modbus adresu modulu\n"
+    "  baud <n>                  zmen rychlost RS485 (napr. 9600)\n"
+    "  scan [od] [do]            hladaj Modbus zariadenia (default 1..247)\n"
+    "  scanbaud                  skus bezne rychlosti a adresy 1..16\n"
+    "\n"
+    "  Surovy Modbus (hodnoty dec alebo 0x hex):\n"
+    "  mb rc <id> <adr> [n]      citaj coily          (FC01)\n"
+    "  mb ri <id> <adr> [n]      citaj diskretne vst. (FC02)\n"
+    "  mb rh <id> <adr> [n]      citaj holding reg.   (FC03)\n"
+    "  mb rr <id> <adr> [n]      citaj input reg.     (FC04)\n"
+    "  mb wc <id> <adr> <0|1>    zapis coil           (FC05)\n"
+    "  mb wh <id> <adr> <val>    zapis holding reg.   (FC06)\n"
+  ));
+}
+
+// ---------------------------------------------------------------------------
+//  Príkazy
+// ---------------------------------------------------------------------------
+#define MAX_TOKENS 6
+
+long toNum(const char* s, bool* ok) {
+  char* end;
+  long v = strtol(s, &end, 0);
+  *ok = (s[0] != '\0' && *end == '\0');
+  return v;
+}
+
+// Spoločná logika pre `r` a `x`
+void cmdRelay(char kind, int argc, char** argv, Print& out) {
+  bool ext = (kind == 'x');
+  int count = ext ? EXT_COUNT : 4;
+
+  if (ext && argc == 1) {
+    printExternal(out, true);
+    return;
+  }
+  if (argc < 3) {
+    out.println(F("  Pouzitie: r|x <cislo|all> <on|off|t|p [ms]>"));
+    return;
+  }
+
+  int from, to;
+  if (strcmp(argv[1], "all") == 0) {
+    from = 1; to = count;
+  } else {
+    bool ok;
+    long n = toNum(argv[1], &ok);
+    if (!ok || n < 1 || n > count) {
+      out.print(F("  ! Cislo rele musi byt 1..")); out.println(count);
+      return;
+    }
+    from = to = (int)n;
+  }
+
+  const char* act = argv[2];
+  bool isPulse = strcmp(act, "p") == 0 || strcmp(act, "pulse") == 0;
+  bool isToggle = strcmp(act, "t") == 0 || strcmp(act, "toggle") == 0;
+  bool isOn = strcmp(act, "on") == 0 || strcmp(act, "1") == 0;
+  bool isOff = strcmp(act, "off") == 0 || strcmp(act, "0") == 0;
+  if (!isPulse && !isToggle && !isOn && !isOff) {
+    out.println(F("  ! Akcia: on | off | t | p [ms]"));
+    return;
+  }
+
+  unsigned long pulseMs = 500;
+  if (isPulse && argc >= 4) {
+    bool ok;
+    long ms = toNum(argv[3], &ok);
+    if (!ok || ms < 1 || ms > 60000) {
+      out.println(F("  ! Dlzka impulzu 1..60000 ms"));
+      return;
+    }
+    pulseMs = ms;
+  }
+
+  if (ext && isToggle && !extKnown) extReadAll(out);
+
+  for (int ch = from; ch <= to; ch++) {
+    bool cur = ext ? extState[ch - 1] : intState[ch - 1];
+    bool target = isOn || isPulse || (isToggle && !cur);
+    if (ext) {
+      if (!extWrite(ch, target, out)) return;
+    } else {
+      intWrite(ch, target);
+    }
+    out.print(F("  ")); out.print(ext ? 'X' : 'R'); out.print(ch);
+    out.print(F(" -> ")); out.print(onOff(target)); out.print(F("  "));
+    out.println(ext ? extName(ch - 1) : INTERNAL_RELAY_NAMES[ch - 1]);
+  }
+
+  if (isPulse) {
+    delay(pulseMs);
+    for (int ch = from; ch <= to; ch++) {
+      if (ext) extWrite(ch, false, out);
+      else intWrite(ch, false);
+    }
+    out.print(F("  impulz ")); out.print(pulseMs); out.println(F(" ms hotovy, OFF"));
+  }
+}
+
+void allOff(Print& out) {
+  for (int ch = 1; ch <= 4; ch++) intWrite(ch, false);
+  bool extOk = true;
+  for (int ch = 1; ch <= EXT_COUNT; ch++) {
+    if (!extWrite(ch, false, out)) { extOk = false; break; }
+  }
+  if (extOk) extKnown = true;
+  out.println(extOk ? F("  Vsetko vypnute.") : F("  Interne vypnute, externy modul neodpoveda."));
+}
+
+void cmdWalk(int argc, char** argv, Print& out) {
+  if (argc < 2 || (strcmp(argv[1], "r") != 0 && strcmp(argv[1], "x") != 0)) {
+    out.println(F("  Pouzitie: walk r | walk x"));
+    return;
+  }
+  bool ext = argv[1][0] == 'x';
+  int count = ext ? EXT_COUNT : 4;
+  out.println(F("  Walk start – zapisuj si, co sa zopne. Lubovolny znak = stop."));
+  for (int ch = 1; ch <= count; ch++) {
+    out.print(F("  >> ")); out.print(ext ? 'X' : 'R'); out.print(ch);
+    out.print(F(" ZOPNUTE  (")); out.print(ext ? extName(ch - 1) : INTERNAL_RELAY_NAMES[ch - 1]);
+    out.println(F(")"));
+    if (ext) { if (!extWrite(ch, true, out)) return; }
+    else intWrite(ch, true);
+
+    bool aborted = waitOrAbort(WALK_ON_MS);
+
+    if (ext) extWrite(ch, false, out);
+    else intWrite(ch, false);
+
+    if (aborted || waitOrAbort(WALK_GAP_MS)) {
+      out.println(F("  Walk preruseny."));
+      return;
+    }
+  }
+  out.println(F("  Walk hotovy."));
+}
+
+// Vráti true, ak na danej adrese niečo odpovedalo
+bool probeId(int id, Print& out, bool verbose) {
+  if (ModbusRTUClient.requestFrom(id, COILS, 0, 1)) {
+    if (verbose) { out.print(F("  + ID ")); out.print(id); out.println(F(": odpoveda (coily)")); }
+    return true;
+  }
+  bool coilTimeout = isTimeoutError();
+  if (ModbusRTUClient.requestFrom(id, HOLDING_REGISTERS, 0, 1)) {
+    if (verbose) { out.print(F("  + ID ")); out.print(id); out.println(F(": odpoveda (holding registre)")); }
+    return true;
+  }
+  if (!coilTimeout || !isTimeoutError()) {
+    // Niečo prišlo, ale s chybou (výnimka, CRC...) – pravdepodobne zariadenie existuje
+    if (verbose) {
+      out.print(F("  ? ID ")); out.print(id); out.print(F(": odpoved s chybou: "));
+      const char* e = ModbusRTUClient.lastError();
+      out.println(e ? e : "?");
+    }
+    return true;
+  }
+  return false;
+}
+
+void cmdScan(int argc, char** argv, Print& out) {
+  int from = 1, to = 247;
+  bool ok;
+  if (argc >= 2) { long v = toNum(argv[1], &ok); if (ok) from = constrain(v, 1, 247); }
+  if (argc >= 3) { long v = toNum(argv[2], &ok); if (ok) to = constrain(v, from, 247); }
+
+  out.print(F("  Skenujem ID ")); out.print(from); out.print(F("..")); out.print(to);
+  out.print(F(" @ ")); out.print(mbBaud); out.println(F(" baud (lubovolny znak = stop)"));
+
+  ModbusRTUClient.setTimeout(SCAN_TIMEOUT_MS);
+  int found = 0;
+  for (int id = from; id <= to; id++) {
+    if (abortRequested()) { out.println(F("  Sken preruseny.")); break; }
+    if (probeId(id, out, true)) found++;
+    delay(5);
+  }
+  ModbusRTUClient.setTimeout(MODBUS_TIMEOUT_MS);
+  out.print(F("  Najdenych: ")); out.println(found);
+}
+
+void cmdScanBaud(Print& out) {
+  const unsigned long bauds[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
+  unsigned long original = mbBaud;
+  out.print(F("  Skusam rychlosti, ID 1..")); out.print(SCANBAUD_MAX_ID);
+  out.println(F(" (lubovolny znak = stop)"));
+
+  bool aborted = false;
+  for (unsigned int b = 0; b < sizeof(bauds) / sizeof(bauds[0]) && !aborted; b++) {
+    if (!modbusBegin(bauds[b])) continue;
+    ModbusRTUClient.setTimeout(SCAN_TIMEOUT_MS);
+    out.print(F("  ")); out.print(bauds[b]); out.print(F(": "));
+    int found = 0;
+    for (int id = 1; id <= SCANBAUD_MAX_ID; id++) {
+      if (abortRequested()) { aborted = true; break; }
+      if (probeId(id, out, false)) {
+        out.print(F("ID ")); out.print(id); out.print(F("  "));
+        found++;
+      }
+      delay(5);
+    }
+    out.println(found ? F("") : F("-"));
+  }
+  modbusBegin(original);
+  out.print(F("  Obnovene ")); out.print(original);
+  out.println(F(" baud. Nastav spravnu cez `baud <n>` a `id <n>`."));
+}
+
+void cmdMb(int argc, char** argv, Print& out) {
+  if (argc == 1) {
+    out.print(F("  Modbus: ID ")); out.print(mbId);
+    out.print(F(", ")); out.print(mbBaud); out.print(F(" baud, kanalov "));
+    out.print(EXT_COUNT); out.print(F(", coil offset ")); out.println(RELAY_COIL_OFFSET);
+    return;
+  }
+  if (argc < 4) {
+    out.println(F("  Pouzitie: mb <rc|ri|rh|rr|wc|wh> <id> <adr> [n|hodnota]"));
+    return;
+  }
+  bool ok1, ok2, ok3 = true;
+  long id = toNum(argv[2], &ok1);
+  long addr = toNum(argv[3], &ok2);
+  long val = (argc >= 5) ? toNum(argv[4], &ok3) : 1;
+  if (!ok1 || !ok2 || !ok3 || id < 0 || id > 247 || addr < 0 || addr > 0xFFFF) {
+    out.println(F("  ! Neplatne cislo"));
+    return;
+  }
+
+  const char* op = argv[1];
+  if (op[0] == 'r') {
+    int type;
+    switch (op[1]) {
+      case 'c': type = COILS; break;
+      case 'i': type = DISCRETE_INPUTS; break;
+      case 'h': type = HOLDING_REGISTERS; break;
+      case 'r': type = INPUT_REGISTERS; break;
+      default: out.println(F("  ! Nezname: rc|ri|rh|rr")); return;
+    }
+    if (val < 1 || val > 64) { out.println(F("  ! n = 1..64")); return; }
+    int n = ModbusRTUClient.requestFrom(id, type, addr, val);
+    if (!n) { printMbError(out); return; }
+    for (int i = 0; i < n; i++) {
+      long v = ModbusRTUClient.read();
+      out.print(F("  [")); out.print(addr + i); out.print(F("] = ")); out.print(v);
+      if (type == HOLDING_REGISTERS || type == INPUT_REGISTERS) {
+        out.print(F("  (0x")); out.print(v, HEX); out.print(F(")"));
+      }
+      out.println();
+    }
+  } else if (strcmp(op, "wc") == 0) {
+    if (argc < 5) { out.println(F("  ! Chyba hodnota 0|1")); return; }
+    if (ModbusRTUClient.coilWrite(id, addr, val ? 1 : 0)) out.println(F("  OK"));
+    else printMbError(out);
+  } else if (strcmp(op, "wh") == 0) {
+    if (argc < 5) { out.println(F("  ! Chyba hodnota")); return; }
+    if (ModbusRTUClient.holdingRegisterWrite(id, addr, (uint16_t)val)) out.println(F("  OK"));
+    else printMbError(out);
+  } else {
+    out.println(F("  ! Nezname: rc|ri|rh|rr|wc|wh"));
+  }
+}
+
+void handleCommand(char* line, Print& out) {
+  // na malé písmená
+  for (char* p = line; *p; p++) *p = tolower(*p);
+
+  char* argv[MAX_TOKENS];
+  int argc = 0;
+  for (char* tok = strtok(line, " \t"); tok && argc < MAX_TOKENS; tok = strtok(nullptr, " \t")) {
+    argv[argc++] = tok;
+  }
+  if (argc == 0) return;
+
+  const char* c = argv[0];
+  if (strcmp(c, "help") == 0 || strcmp(c, "?") == 0) {
+    printHelp(out);
+  } else if (strcmp(c, "status") == 0 || strcmp(c, "s") == 0) {
+    printInternal(out);
+    printExternal(out, true);
+    printInputs(out);
+  } else if (strcmp(c, "r") == 0 || strcmp(c, "x") == 0) {
+    cmdRelay(c[0], argc, argv, out);
+  } else if (strcmp(c, "off") == 0) {
+    allOff(out);
+  } else if (strcmp(c, "in") == 0) {
+    printInputs(out);
+  } else if (strcmp(c, "watch") == 0 || strcmp(c, "w") == 0) {
+    watchMode = !watchMode;
+    if (watchMode) updateInputs();  // aby prvá zmena nebola falošná
+    out.println(watchMode ? F("  Watch ZAP – vypisujem zmeny vstupov") : F("  Watch VYP"));
+  } else if (strcmp(c, "walk") == 0) {
+    cmdWalk(argc, argv, out);
+  } else if (strcmp(c, "mb") == 0) {
+    cmdMb(argc, argv, out);
+  } else if (strcmp(c, "id") == 0) {
+    bool ok;
+    long v = (argc >= 2) ? toNum(argv[1], &ok) : (ok = false, 0);
+    if (!ok || v < 1 || v > 247) { out.println(F("  ! id 1..247")); return; }
+    mbId = v;
+    extKnown = false;
+    out.print(F("  Modbus ID = ")); out.println(mbId);
+  } else if (strcmp(c, "baud") == 0) {
+    bool ok;
+    long v = (argc >= 2) ? toNum(argv[1], &ok) : (ok = false, 0);
+    if (!ok || v < 1200 || v > 115200) { out.println(F("  ! baud 1200..115200")); return; }
+    if (modbusBegin(v)) { out.print(F("  RS485 = ")); out.print(v); out.println(F(" baud")); }
+    else out.println(F("  ! Modbus sa nepodarilo spustit"));
+  } else if (strcmp(c, "scan") == 0) {
+    cmdScan(argc, argv, out);
+  } else if (strcmp(c, "scanbaud") == 0) {
+    cmdScanBaud(out);
+  } else {
+    out.print(F("  ? Neznamy prikaz: ")); out.print(c); out.println(F("  (help)"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+//  Setup / loop
+// ---------------------------------------------------------------------------
+void setup() {
+  for (int i = 0; i < 4; i++) {
+    pinMode(RELAY_PINS[i], OUTPUT);
+    pinMode(RELAY_LEDS[i], OUTPUT);
+    intWrite(i + 1, false);
+  }
+#ifdef BTN_USER
+  pinMode(BTN_USER, INPUT);
+#endif
+  analogReadResolution(12);
+
+  Serial.begin(USB_BAUD);
+  unsigned long t0 = millis();
+  while (!Serial && millis() - t0 < 3000) {}  // nečakaj donekonečna (beh bez PC)
+
+  Serial.println(F("\n=== Opta relay test ==="));
+  if (modbusBegin(mbBaud)) {
+    Serial.print(F("Modbus RTU OK: ")); Serial.print(mbBaud);
+    Serial.print(F(" baud, modul ID ")); Serial.println(mbId);
+  } else {
+    Serial.println(F("! Modbus RTU sa nepodarilo spustit"));
+  }
+
+  if (ALL_OFF_ON_BOOT) allOff(Serial);
+  updateInputs();
+  Serial.println(F("Napis `help` pre zoznam prikazov."));
+  Serial.print(F("> "));
+}
+
+void loop() {
+  // Čítanie riadku zo Serial Monitora
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch == '\r' || ch == '\n') {
+      if (lineLen > 0) {
+        lineBuf[lineLen] = '\0';
+        Serial.println(lineBuf);
+        handleCommand(lineBuf, Serial);
+        lineLen = 0;
+        Serial.print(F("> "));
+      }
+    } else if (lineLen < sizeof(lineBuf) - 1) {
+      lineBuf[lineLen++] = ch;
+    }
+  }
+
+  // Priebežné sledovanie vstupov
+  if (watchMode && millis() - lastWatch >= WATCH_PERIOD_MS) {
+    lastWatch = millis();
+    uint16_t changed = updateInputs();
+    for (int i = 0; i < 8; i++) {
+      if (changed & (1 << i)) {
+        Serial.print(F("\n  [")); Serial.print(millis() / 1000.0f, 1); Serial.print(F(" s] I"));
+        Serial.print(i + 1); Serial.print(F(" -> ")); Serial.print(onOff(inState[i]));
+        Serial.print(F(" (")); Serial.print(inVolt[i], 2); Serial.print(F(" V)  "));
+        Serial.println(INPUT_NAMES[i]);
+      }
+    }
+#ifdef BTN_USER
+    if (changed & (1 << 8)) {
+      Serial.print(F("\n  USER tlacidlo -> ")); Serial.println(btnState ? F("stlacene") : F("uvolnene"));
+    }
+#endif
+  }
+}
