@@ -1,6 +1,6 @@
 # PFT-G4-NEO
 
-Arduino Opta + externý relé modul na RS485 (Modbus RTU).
+Arduino Opta + **Waveshare Modbus RTU Relay** na RS485.
 Prvá fáza: **zmapovať všetky výstupy a vstupy** a vedieť ich prepínať
 z Serial Monitora. Sieťové ovládanie (HTTP/MQTT) príde až potom.
 
@@ -34,20 +34,40 @@ arduino-cli monitor -p /dev/ttyACM0 -c baudrate=115200
 
 ## Zapojenie RS485
 
-Opta má svorky **A / B / COM** (modely RS485 a WiFi). Prepoj `A→A`, `B→B`,
-`COM→GND` s relé modulom. Na koncoch dlhšej linky daj **120 Ω terminátor**
-(Opta ho má riešený cez `RS485.begin()` knižnice – ak máš problémy s
-komunikáciou na dlhom vedení, skús externý odpor). Relé modul potrebuje
-vlastné napájanie (zvyčajne 12/24 V).
+Opta má svorky **A / B / COM** (modely RS485 a WiFi). Waveshare modul má
+**A / B** (a GND). Prepoj `A→A`, `B→B`, `COM→GND`. Na koncoch dlhšej linky
+patrí **120 Ω terminátor** – Waveshare ho má zvyčajne na doske jumperom.
+Modul potrebuje vlastné napájanie: základná verzia 5 V, verzie **(B)/(D)**
+7–36 V.
 
-Ak komunikácia nejde, prehoď A a B – rôzni výrobcovia ich značia opačne.
+Ak komunikácia nejde, prehoď A a B – býva to najčastejšia príčina.
+
+## Waveshare protokol – čo skica používa
+
+| Čo | Modbus |
+|---|---|
+| Relé 1..N | coily `0x0000`+ (FC01 čítanie, FC05 zápis) |
+| Všetky relé naraz | coil `0x00FF` (`off`, `x all on/off` pošle jeden rámec) |
+| Digitálne vstupy (varianta D) | discrete inputs `0x0000`+ (FC02) |
+| Adresa zariadenia | holding register `0x4000` (FC03/FC06) |
+| Rýchlosť | holding register `0x2000`, `0`=4800 … `5`=115200 (FC06) |
+| Verzia firmvéru | holding register `0x8000` (FC03) |
+
+Z výroby má modul **9600 8N1, adresu 1**.
+
+Zmena nastavení priamo z konzoly (mení modul natrvalo, v `config.h` to
+potom oprav aj ty):
+
+```
+> ws addr            adresa uložená v module
+> ws setaddr 3       zmení adresu modulu na 3
+> ws setbaud 115200  zmení rýchlosť modulu (a hneď prepne aj Optu)
+```
 
 ## Rýchly štart
 
 ```
-> scanbaud          nájde baud aj Modbus adresu modulu
-> baud 9600
-> id 1
+> probe             adresa modulu, verzia firmvéru, počet kanálov
 > status            stav interných relé, externých relé a vstupov
 > walk r            postupne zopne R1..R4 – zapíš si, čo cvakne
 > walk x            to isté pre externý modul
@@ -64,15 +84,22 @@ Keď vieš, čo je na čo zapojené, dopíš názvy do `config.h`
 (`INTERNAL_RELAY_NAMES`, `INPUT_NAMES`, `EXT_RELAY_NAMES`) a tabuľky
 v `opta_relay_test/MAPOVANIE.md`. Výpisy potom budú pomenované.
 
+## Počet kanálov
+
+V `config.h` je `RELAY_MODULE_COUNT 9`, ale skica si počet **overí sama**
+pri štarte aj pri `probe` (číta coily, kým modul neohlási neplatnú adresu)
+a riadi sa tým, čo hlási hardvér. Ak vypíše iné číslo, než máš v configu,
+prepíš `RELAY_MODULE_COUNT` na hlásenú hodnotu. Ručne sa dá nastaviť aj
+príkazom `count <n>`.
+
 ## Keď modul neodpovedá
 
 - `scan` prejde adresy 1..247 na aktuálnom baude, `scanbaud` skúsi bežné
   rýchlosti pre adresy 1..16.
-- Surové Modbus príkazy na skúmanie neznámeho modulu:
+- Prehoď A/B, over napájanie modulu a spoločnú zem.
+- Surové Modbus príkazy na skúmanie:
   `mb rc 1 0 8` (čítaj 8 coilov), `mb wc 1 0 1` (zapíš coil 0),
-  `mb rh 1 0 4` (holding registre), `mb wh 1 0 1`.
-- Niektoré moduly sa neovládajú coilmi ale holding registrami – zisti to
-  cez `mb rh` a uprav `extWrite()` v skici.
+  `mb rh 1 0x4000 1` (adresa zariadenia), `mb rh 1 0x8000 1` (verzia).
 
 ## Ďalší krok – sieť
 

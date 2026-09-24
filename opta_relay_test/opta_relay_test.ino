@@ -3,7 +3,7 @@
 //
 //  - 4 interné relé Opty (R1..R4)
 //  - 8 vstupov Opty (I1..I8 = A0..A7)
-//  - externý relé modul na RS485 (Modbus RTU), kanály X1..Xn
+//  - Waveshare Modbus RTU Relay na RS485, kanály X1..Xn
 //
 //  Knižnice (Library Manager): ArduinoRS485, ArduinoModbus
 //  Doska: Arduino Mbed OS Opta Boards -> Opta
@@ -26,14 +26,14 @@ const int RELAY_PINS[4]  = {D0, D1, D2, D3};
 const int RELAY_LEDS[4]  = {LED_D0, LED_D1, LED_D2, LED_D3};
 const int INPUT_PINS[8]  = {A0, A1, A2, A3, A4, A5, A6, A7};
 
-const int EXT_COUNT = RELAY_MODULE_COUNT;
 const int EXT_NAMES_COUNT = sizeof(EXT_RELAY_NAMES) / sizeof(EXT_RELAY_NAMES[0]);
 
 // ---------------------------------------------------------------------------
 //  Stav
 // ---------------------------------------------------------------------------
+int extCount = RELAY_MODULE_COUNT;   // `probe` alebo `count <n>` to zmení za behu
 bool intState[4] = {false, false, false, false};
-bool extState[32] = {false};
+bool extState[MAX_EXT_CHANNELS] = {false};
 bool extKnown = false;          // či extState zodpovedá realite (po úspešnom čítaní/zápise)
 
 bool  inState[8] = {false};
@@ -124,16 +124,55 @@ bool extWrite(int ch, bool on, Print& out) {  // ch = 1-based
 }
 
 bool extReadAll(Print& out) {
-  if (!ModbusRTUClient.requestFrom(mbId, COILS, RELAY_COIL_OFFSET, EXT_COUNT)) {
+  if (!ModbusRTUClient.requestFrom(mbId, COILS, RELAY_COIL_OFFSET, extCount)) {
     out.println(F("  ! Citanie stavu externeho modulu zlyhalo"));
+    printMbError(out);
+    if (!isTimeoutError()) {
+      out.println(F("    (modul odpovedal chybou – mozno ma menej kanalov, skus `probe`)"));
+    }
+    extKnown = false;
+    return false;
+  }
+  for (int i = 0; i < extCount; i++) {
+    extState[i] = ModbusRTUClient.read() != 0;
+  }
+  extKnown = true;
+  return true;
+}
+
+// Waveshare: coil 0x00FF ovláda naraz všetky relé (jeden rámec namiesto N)
+bool extWriteAll(bool on, Print& out) {
+  if (!ModbusRTUClient.coilWrite(mbId, WS_COIL_ALL, on ? 1 : 0)) {
+    out.println(F("  ! Hromadny zapis (coil 0x00FF) zlyhal"));
     printMbError(out);
     extKnown = false;
     return false;
   }
-  for (int i = 0; i < EXT_COUNT; i++) {
-    extState[i] = ModbusRTUClient.read() != 0;
-  }
+  for (int i = 0; i < MAX_EXT_CHANNELS; i++) extState[i] = on;
   extKnown = true;
+  return true;
+}
+
+// Koľko coilov modul naozaj má: posledný počet, ktorý sa dá prečítať naraz
+int extProbeCount() {
+  int last = 0;
+  for (int n = 1; n <= MAX_EXT_CHANNELS; n++) {
+    if (ModbusRTUClient.requestFrom(mbId, COILS, RELAY_COIL_OFFSET, n)) {
+      while (ModbusRTUClient.available()) ModbusRTUClient.read();
+      last = n;
+    } else if (!isTimeoutError()) {
+      break;             // modul povedal "neplatna adresa" – sme za koncom
+    } else if (last) {
+      break;             // prestal odpovedať, ale predtým odpovedal
+    }
+    delay(5);
+  }
+  return last;
+}
+
+bool extReadReg(uint16_t reg, long* value) {
+  if (!ModbusRTUClient.requestFrom(mbId, HOLDING_REGISTERS, reg, 1)) return false;
+  *value = ModbusRTUClient.read();
   return true;
 }
 
@@ -195,7 +234,7 @@ void printExternal(Print& out, bool refresh) {
   out.print(F("Externy modul (ID ")); out.print(mbId);
   out.print(F(", ")); out.print(mbBaud); out.println(F(" baud):"));
   if (refresh) extReadAll(out);
-  for (int i = 0; i < EXT_COUNT; i++) {
+  for (int i = 0; i < extCount; i++) {
     out.print(F("  X")); out.print(i + 1); out.print(i + 1 < 10 ? F("  ") : F(" "));
     out.print(extKnown ? onOff(extState[i]) : "???"); out.print(F("  "));
     out.println(extName(i));
@@ -214,6 +253,20 @@ void printInputs(Print& out) {
 #ifdef BTN_USER
   out.print(F("  USER tlacidlo: ")); out.println(btnState ? F("stlacene") : F("uvolnene"));
 #endif
+
+#if WS_DIGITAL_INPUTS > 0
+  // Varianta Modbus RTU Relay (D) má aj digitálne vstupy (FC02 od adresy 0)
+  out.println(F("Vstupy (Waveshare modul):"));
+  if (ModbusRTUClient.requestFrom(mbId, DISCRETE_INPUTS, 0, WS_DIGITAL_INPUTS)) {
+    for (int i = 0; i < WS_DIGITAL_INPUTS; i++) {
+      out.print(F("  DI")); out.print(i + 1); out.print(F("  "));
+      out.println(onOff(ModbusRTUClient.read() != 0));
+    }
+  } else {
+    out.println(F("  ! Citanie zlyhalo (ma tvoj modul vstupy? WS_DIGITAL_INPUTS)"));
+    printMbError(out);
+  }
+#endif
 }
 
 void printHelp(Print& out) {
@@ -224,7 +277,7 @@ void printHelp(Print& out) {
     "\n"
     "  r <1-4|all> <on|off|t>    interne rele Opty (t = prepni)\n"
     "  r <1-4> p [ms]            impulz (default 500 ms)\n"
-    "  x <1-N|all> <on|off|t>    externe rele na RS485 module\n"
+    "  x <1-N|all> <on|off|t>    externe rele na Waveshare module\n"
     "  x <1-N> p [ms]            impulz\n"
     "  x                         precitaj stav externeho modulu\n"
     "  off                       VSETKO vypnut (interne aj externe)\n"
@@ -235,11 +288,19 @@ void printHelp(Print& out) {
     "  walk r | walk x           postupne zopne kazde rele (na identifikaciu)\n"
     "                            lubovolny znak = prerusit\n"
     "\n"
+    "  probe                     zisti adresu, verziu a pocet kanalov modulu\n"
     "  mb                        aktualne Modbus nastavenia\n"
-    "  id <n>                    zmen Modbus adresu modulu\n"
-    "  baud <n>                  zmen rychlost RS485 (napr. 9600)\n"
+    "  id <n>                    na akej adrese Opta modul oslovuje\n"
+    "  baud <n>                  rychlost RS485 na strane Opty\n"
+    "  count <n>                 rucne nastav pocet kanalov modulu\n"
     "  scan [od] [do]            hladaj Modbus zariadenia (default 1..247)\n"
     "  scanbaud                  skus bezne rychlosti a adresy 1..16\n"
+    "\n"
+    "  Waveshare nastavenia (menia modul natrvalo!):\n"
+    "  ws addr                   precitaj adresu ulozenu v module (reg 0x4000)\n"
+    "  ws ver                    verzia firmveru (reg 0x8000)\n"
+    "  ws setaddr <n>            ZMEN adresu modulu\n"
+    "  ws setbaud <n>            ZMEN rychlost modulu (4800..115200)\n"
     "\n"
     "  Surovy Modbus (hodnoty dec alebo 0x hex):\n"
     "  mb rc <id> <adr> [n]      citaj coily          (FC01)\n"
@@ -266,7 +327,7 @@ long toNum(const char* s, bool* ok) {
 // Spoločná logika pre `r` a `x`
 void cmdRelay(char kind, int argc, char** argv, Print& out) {
   bool ext = (kind == 'x');
-  int count = ext ? EXT_COUNT : 4;
+  int count = ext ? extCount : 4;
 
   if (ext && argc == 1) {
     printExternal(out, true);
@@ -313,6 +374,14 @@ void cmdRelay(char kind, int argc, char** argv, Print& out) {
 
   if (ext && isToggle && !extKnown) extReadAll(out);
 
+  // `x all on|off` vie Waveshare vybaviť jediným rámcom na coile 0x00FF
+  if (ext && !isToggle && !isPulse && from == 1 && to == extCount) {
+    if (!extWriteAll(isOn, out)) return;
+    out.print(F("  X1..X")); out.print(extCount);
+    out.print(F(" -> ")); out.println(onOff(isOn));
+    return;
+  }
+
   for (int ch = from; ch <= to; ch++) {
     bool cur = ext ? extState[ch - 1] : intState[ch - 1];
     bool target = isOn || isPulse || (isToggle && !cur);
@@ -338,11 +407,7 @@ void cmdRelay(char kind, int argc, char** argv, Print& out) {
 
 void allOff(Print& out) {
   for (int ch = 1; ch <= 4; ch++) intWrite(ch, false);
-  bool extOk = true;
-  for (int ch = 1; ch <= EXT_COUNT; ch++) {
-    if (!extWrite(ch, false, out)) { extOk = false; break; }
-  }
-  if (extOk) extKnown = true;
+  bool extOk = extWriteAll(false, out);
   out.println(extOk ? F("  Vsetko vypnute.") : F("  Interne vypnute, externy modul neodpoveda."));
 }
 
@@ -352,7 +417,7 @@ void cmdWalk(int argc, char** argv, Print& out) {
     return;
   }
   bool ext = argv[1][0] == 'x';
-  int count = ext ? EXT_COUNT : 4;
+  int count = ext ? extCount : 4;
   out.println(F("  Walk start – zapisuj si, co sa zopne. Lubovolny znak = stop."));
   for (int ch = 1; ch <= count; ch++) {
     out.print(F("  >> ")); out.print(ext ? 'X' : 'R'); out.print(ch);
@@ -444,11 +509,97 @@ void cmdScanBaud(Print& out) {
   out.println(F(" baud. Nastav spravnu cez `baud <n>` a `id <n>`."));
 }
 
+// ---------------------------------------------------------------------------
+//  Waveshare-špecifické príkazy
+// ---------------------------------------------------------------------------
+void cmdProbe(Print& out) {
+  out.print(F("  Skusam modul na ID ")); out.print(mbId);
+  out.print(F(" @ ")); out.print(mbBaud); out.println(F(" baud..."));
+
+  long v;
+  if (extReadReg(WS_REG_DEVICE_ADDR, &v)) {
+    out.print(F("  Modbus adresa v module (reg 0x4000): ")); out.println(v);
+    if (v != mbId) out.println(F("  ! Nesedi s nastavenym ID – oprav cez `id <n>`"));
+  } else {
+    out.println(F("  Register 0x4000 sa necita (nevadi, nie kazdy kus ho ma)"));
+  }
+  if (extReadReg(WS_REG_VERSION, &v)) {
+    out.print(F("  Verzia firmveru (reg 0x8000): ")); out.println(v);
+  }
+
+  int n = extProbeCount();
+  if (n == 0) {
+    out.println(F("  ! Modul neodpoveda. Skus `scan` / `scanbaud`, prehod A a B."));
+    return;
+  }
+  out.print(F("  Pocet kanalov (coilov): ")); out.println(n);
+  if (n != extCount) {
+    out.print(F("  Menim nastaveny pocet z ")); out.print(extCount);
+    out.print(F(" na ")); out.println(n);
+    out.println(F("  (natrvalo: RELAY_MODULE_COUNT v config.h)"));
+    extCount = n;
+  }
+  extReadAll(out);
+}
+
+void cmdWs(int argc, char** argv, Print& out) {
+  if (argc < 2) {
+    out.println(F("  Pouzitie: ws addr | ws ver | ws setaddr <n> | ws setbaud <n>"));
+    return;
+  }
+  const char* op = argv[1];
+  long v;
+
+  if (strcmp(op, "addr") == 0) {
+    if (extReadReg(WS_REG_DEVICE_ADDR, &v)) { out.print(F("  Adresa modulu: ")); out.println(v); }
+    else printMbError(out);
+
+  } else if (strcmp(op, "ver") == 0) {
+    if (extReadReg(WS_REG_VERSION, &v)) { out.print(F("  Verzia: ")); out.println(v); }
+    else printMbError(out);
+
+  } else if (strcmp(op, "setaddr") == 0) {
+    bool ok;
+    long n = (argc >= 3) ? toNum(argv[2], &ok) : (ok = false, 0);
+    if (!ok || n < 1 || n > 247) { out.println(F("  ! adresa 1..247")); return; }
+    if (ModbusRTUClient.holdingRegisterWrite(mbId, WS_REG_DEVICE_ADDR, (uint16_t)n)) {
+      mbId = n;
+      extKnown = false;
+      out.print(F("  Modul ma teraz adresu ")); out.println(n);
+      out.println(F("  (zapis aj do RELAY_MODULE_ID v config.h)"));
+    } else printMbError(out);
+
+  } else if (strcmp(op, "setbaud") == 0) {
+    const unsigned long table[] = {4800, 9600, 19200, 38400, 57600, 115200};
+    bool ok;
+    long n = (argc >= 3) ? toNum(argv[2], &ok) : (ok = false, 0);
+    int idx = -1;
+    for (unsigned int i = 0; ok && i < sizeof(table) / sizeof(table[0]); i++) {
+      if ((long)table[i] == n) idx = i;
+    }
+    if (idx < 0) {
+      out.println(F("  ! Modul podporuje: 4800 9600 19200 38400 57600 115200"));
+      return;
+    }
+    if (ModbusRTUClient.holdingRegisterWrite(mbId, WS_REG_BAUD, (uint16_t)idx)) {
+      out.print(F("  Modul prepnuty na ")); out.print(n); out.println(F(" baud."));
+      out.println(F("  Prepinam aj Optu..."));
+      delay(200);
+      if (modbusBegin(n)) out.println(F("  OK – over cez `x` alebo `probe`."));
+      else out.println(F("  ! Optu sa nepodarilo prepnut"));
+      out.println(F("  (zapis aj do MODBUS_BAUD v config.h)"));
+    } else printMbError(out);
+
+  } else {
+    out.println(F("  ! Nezname: addr | ver | setaddr | setbaud"));
+  }
+}
+
 void cmdMb(int argc, char** argv, Print& out) {
   if (argc == 1) {
     out.print(F("  Modbus: ID ")); out.print(mbId);
     out.print(F(", ")); out.print(mbBaud); out.print(F(" baud, kanalov "));
-    out.print(EXT_COUNT); out.print(F(", coil offset ")); out.println(RELAY_COIL_OFFSET);
+    out.print(extCount); out.print(F(", coil offset ")); out.println(RELAY_COIL_OFFSET);
     return;
   }
   if (argc < 4) {
@@ -530,6 +681,20 @@ void handleCommand(char* line, Print& out) {
     cmdWalk(argc, argv, out);
   } else if (strcmp(c, "mb") == 0) {
     cmdMb(argc, argv, out);
+  } else if (strcmp(c, "probe") == 0) {
+    cmdProbe(out);
+  } else if (strcmp(c, "ws") == 0) {
+    cmdWs(argc, argv, out);
+  } else if (strcmp(c, "count") == 0) {
+    bool ok;
+    long v = (argc >= 2) ? toNum(argv[1], &ok) : (ok = false, 0);
+    if (!ok || v < 1 || v > MAX_EXT_CHANNELS) {
+      out.print(F("  ! count 1..")); out.println(MAX_EXT_CHANNELS);
+      return;
+    }
+    extCount = v;
+    extKnown = false;
+    out.print(F("  Pocet externych kanalov = ")); out.println(extCount);
   } else if (strcmp(c, "id") == 0) {
     bool ok;
     long v = (argc >= 2) ? toNum(argv[1], &ok) : (ok = false, 0);
@@ -576,6 +741,22 @@ void setup() {
     Serial.print(F(" baud, modul ID ")); Serial.println(mbId);
   } else {
     Serial.println(F("! Modbus RTU sa nepodarilo spustit"));
+  }
+
+  // Overenie počtu kanálov – ak modul má iný počet, než je v config.h,
+  // radšej sa riadime tým, čo hlási hardvér.
+  if (mbStarted) {
+    int n = extProbeCount();
+    if (n == 0) {
+      Serial.println(F("! Modul neodpoveda – skus `scan`, `scanbaud`, alebo prehod A/B"));
+    } else if (n != extCount) {
+      Serial.print(F("! Modul hlasi ")); Serial.print(n);
+      Serial.print(F(" kanalov (config.h ma ")); Serial.print(extCount);
+      Serial.println(F(") – pouzivam hodnotu z modulu"));
+      extCount = n;
+    } else {
+      Serial.print(F("Kanalov na module: ")); Serial.println(extCount);
+    }
   }
 
   if (ALL_OFF_ON_BOOT) allOff(Serial);

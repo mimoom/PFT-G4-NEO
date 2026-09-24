@@ -9,9 +9,8 @@
 #define USB_BAUD 115200
 
 // ---------------------------------------------------------------------------
-//  RS485 / Modbus RTU – externý relé modul
-//  Väčšina lacných Modbus relé modulov má z výroby 9600 8N1, adresa 1.
-//  Ak si nie si istý, použi príkazy `scan` a `scanbaud` v Serial Monitore.
+//  RS485 / Modbus RTU – Waveshare Modbus RTU Relay
+//  Z výroby: 9600 8N1, adresa 1. Ak nesedí, použi `scan` / `scanbaud`.
 // ---------------------------------------------------------------------------
 #define MODBUS_BAUD          9600
 #define MODBUS_SERIAL_CONFIG SERIAL_8N1
@@ -20,14 +19,27 @@
 #define SCANBAUD_MAX_ID      16      // `scanbaud` skúša adresy 1..SCANBAUD_MAX_ID
 
 #define RELAY_MODULE_ID      1       // Modbus adresa (slave ID) relé modulu
-#define RELAY_MODULE_COUNT   8       // počet kanálov na module (max 32)
-#define RELAY_COIL_OFFSET    0       // adresa coilu pre kanál 1 (zvyčajne 0)
+#define RELAY_MODULE_COUNT   9       // počet kanálov; `probe` ho zistí a prepíše
+#define MAX_EXT_CHANNELS     32      // horný limit (Waveshare má verzie do 32 ch)
+#define RELAY_COIL_OFFSET    0       // adresa coilu pre kanál 1 (Waveshare = 0)
 
 // Po štarte vypnúť všetky relé (interné aj externé)
 #define ALL_OFF_ON_BOOT      true
 
 // ---------------------------------------------------------------------------
-//  Vstupy I1..I8 (0–10 V analóg / 24 V digitál)
+//  Waveshare registre (platia pre Modbus RTU Relay 4/8/16/32CH, aj (B)/(D))
+// ---------------------------------------------------------------------------
+#define WS_COIL_ALL          0x00FF  // coil "všetky relé naraz"
+#define WS_REG_DEVICE_ADDR   0x4000  // FC03 čítaj / FC06 nastav Modbus adresu
+#define WS_REG_BAUD          0x2000  // FC06 nastav rýchlosť (0=4800 … 5=115200)
+#define WS_REG_VERSION       0x8000  // FC03 verzia firmvéru (nie na každom kuse)
+
+// Vstupy má len varianta (D) – 8 digitálnych vstupov na FC02 od adresy 0.
+// Nastav na 0, ak tvoj modul vstupy nemá.
+#define WS_DIGITAL_INPUTS    0
+
+// ---------------------------------------------------------------------------
+//  Vstupy I1..I8 na Opte (0–10 V analóg / 24 V digitál)
 //  Stav ON/OFF sa vyhodnocuje z napätia s hysteréziou.
 //  Pozn.: ADC meria do ~10.7 V, 24 V signál sa zobrazí ako ~10.7 V (= ON).
 // ---------------------------------------------------------------------------
@@ -63,7 +75,7 @@ const char* const INPUT_NAMES[8] = {
   "?",  // I8 (A7)
 };
 
-// Počet položiek musí byť aspoň RELAY_MODULE_COUNT (chýbajúce = "?")
+// Kanály Waveshare modulu. Chýbajúce položky sa vypíšu ako "?".
 const char* const EXT_RELAY_NAMES[] = {
   "?",  // X1
   "?",  // X2
@@ -73,4 +85,5 @@ const char* const EXT_RELAY_NAMES[] = {
   "?",  // X6
   "?",  // X7
   "?",  // X8
+  "?",  // X9
 };

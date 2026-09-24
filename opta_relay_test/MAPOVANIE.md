@@ -1,4 +1,4 @@
-# Mapovanie I/O – Arduino Opta + RS485 relé modul
+# Mapovanie I/O – Arduino Opta + Waveshare Modbus RTU Relay
 
 Tento súbor je **pracovný záznam**. Vypĺňaj ho počas testovania a to isté
 zapíš do `config.h` (polia `INTERNAL_RELAY_NAMES`, `INPUT_NAMES`,
@@ -9,8 +9,9 @@ zapíš do `config.h` (polia `INTERNAL_RELAY_NAMES`, `INPUT_NAMES`,
 | Časť | Popis |
 |---|---|
 | Opta model | (Lite / RS485 / WiFi) — doplň |
-| Externý modul | výrobca/typ: … |
-| RS485 | baud: … , parita: … , Modbus ID: … |
+| Externý modul | Waveshare Modbus RTU Relay, presný typ: … |
+| Počet kanálov | … (skica si ho zistí sama príkazom `probe`) |
+| RS485 | baud: … , 8N1, Modbus ID: … |
 
 ## Interné relé Opty (R1–R4)
 
@@ -41,7 +42,9 @@ Prah ON/OFF nastavuješ v `config.h` (`INPUT_ON_V` / `INPUT_OFF_V`).
 | I7 | A6 | | | |
 | I8 | A7 | | | |
 
-## Externý relé modul na RS485 (X1–Xn)
+## Waveshare modul (X1–Xn)
+
+Relé sú coily od adresy 0. Kontakty 10 A / 250 V AC.
 
 | Kanál | Modbus coil | Zapojené na | Poznámka |
 |---|---|---|---|
@@ -53,15 +56,21 @@ Prah ON/OFF nastavuješ v `config.h` (`INPUT_ON_V` / `INPUT_OFF_V`).
 | X6 | 5 | | |
 | X7 | 6 | | |
 | X8 | 7 | | |
+| X9 | 8 | | |
 
-> Ak modul nepoužíva coily od adresy 0, oprav `RELAY_COIL_OFFSET` v `config.h`.
-> Niektoré moduly sa ovládajú cez holding registre – vtedy použi príkaz
-> `mb rh` / `mb wh` a daj vedieť, doplní sa podpora.
+Ak má modul aj digitálne vstupy (varianta *D*), zapíš ich sem a nastav
+`WS_DIGITAL_INPUTS` v `config.h`:
+
+| Vstup | Modbus discrete input | Zapojené na |
+|---|---|---|
+| DI1 | 0 | |
+| DI2 | 1 | |
 
 ## Postup mapovania
 
 1. Nahraj skicu, otvor Serial Monitor (115200, Newline).
-2. `scanbaud` → nájdi baud a ID modulu. Nastav `baud <n>` a `id <n>`
+2. `probe` → adresa modulu, verzia firmvéru, počet kanálov. Ak modul
+   neodpovedá, `scanbaud` nájde baud aj ID; nastav `baud <n>` a `id <n>`
    (a potom to isté natrvalo do `config.h`).
 3. `walk r` → sleduj, čo cvakne/zopne; zapíš do tabuľky R1–R4.
 4. `walk x` → to isté pre externý modul.
