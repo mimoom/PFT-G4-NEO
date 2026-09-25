@@ -44,6 +44,7 @@ bool watchMode = false;
 unsigned long lastWatch = 0;
 
 unsigned long mbBaud = MODBUS_BAUD;
+uint16_t mbConfig = MODBUS_SERIAL_CONFIG;
 int  mbId = RELAY_MODULE_ID;
 bool mbStarted = false;
 
@@ -92,25 +93,39 @@ bool waitOrAbort(unsigned long ms) {
 // ---------------------------------------------------------------------------
 //  Modbus
 // ---------------------------------------------------------------------------
-bool modbusBegin(unsigned long baud) {
+// Oneskorenia pred/po vysielaní podľa odporúčania Arduino pre Optu (3.5 znaku)
+void applyDelays(unsigned long baud) {
+  float bitDuration = 1.0f / baud;
+  int d = (int)(bitDuration * 9.6f * 3.5f * 1e6f);
+  RS485.setDelays(d, d);
+}
+
+const char* configName(uint16_t cfg) {
+  if (cfg == SERIAL_8E1) return "8E1";
+  if (cfg == SERIAL_8O1) return "8O1";
+  if (cfg == SERIAL_8N2) return "8N2";
+  return "8N1";
+}
+
+bool modbusBegin(unsigned long baud, uint16_t cfg) {
   if (mbStarted) {
     ModbusRTUClient.end();
     mbStarted = false;
   }
-  // Oneskorenia podľa odporúčania Arduino pre Optu (3.5 znaku)
-  float bitDuration = 1.0f / baud;
-  int d = (int)(bitDuration * 9.6f * 3.5f * 1e6f);
-  RS485.setDelays(d, d);
+  applyDelays(baud);
 
-  if (!ModbusRTUClient.begin(baud, MODBUS_SERIAL_CONFIG)) {
+  if (!ModbusRTUClient.begin(baud, cfg)) {
     return false;
   }
+  mbConfig = cfg;
   ModbusRTUClient.setTimeout(MODBUS_TIMEOUT_MS);
   mbBaud = baud;
   mbStarted = true;
   extKnown = false;
   return true;
 }
+
+bool modbusBegin(unsigned long baud) { return modbusBegin(baud, mbConfig); }
 
 bool extWrite(int ch, bool on, Print& out) {  // ch = 1-based
   int addr = RELAY_COIL_OFFSET + ch - 1;
@@ -288,13 +303,19 @@ void printHelp(Print& out) {
     "  walk r | walk x           postupne zopne kazde rele (na identifikaciu)\n"
     "                            lubovolny znak = prerusit\n"
     "\n"
+    "  KED KOMUNIKACIA NEIDE:\n"
+    "  diag                      diagnostika linky + co skontrolovat\n"
+    "  raw <hex bajty>           posli surovy ramec, CRC doplni sam\n"
+    "  sniff [s]                 pocuvaj linku a vypis surove bajty\n"
+    "  scanbaud                  skus rychlosti x parity x adresy 1..16\n"
+    "  scan [od] [do]            hladaj adresy na aktualnej rychlosti\n"
+    "\n"
     "  probe                     zisti adresu, verziu a pocet kanalov modulu\n"
     "  mb                        aktualne Modbus nastavenia\n"
     "  id <n>                    na akej adrese Opta modul oslovuje\n"
     "  baud <n>                  rychlost RS485 na strane Opty\n"
+    "  cfg <8n1|8e1|8o1|8n2>     format ramca na strane Opty\n"
     "  count <n>                 rucne nastav pocet kanalov modulu\n"
-    "  scan [od] [do]            hladaj Modbus zariadenia (default 1..247)\n"
-    "  scanbaud                  skus bezne rychlosti a adresy 1..16\n"
     "\n"
     "  Waveshare nastavenia (menia modul natrvalo!):\n"
     "  ws addr                   precitaj adresu ulozenu v module (reg 0x4000)\n"
@@ -315,7 +336,7 @@ void printHelp(Print& out) {
 // ---------------------------------------------------------------------------
 //  Príkazy
 // ---------------------------------------------------------------------------
-#define MAX_TOKENS 6
+#define MAX_TOKENS 12   // `raw` berie aj celý Modbus rámec po bajtoch
 
 long toNum(const char* s, bool* ok) {
   char* end;
@@ -484,29 +505,209 @@ void cmdScan(int argc, char** argv, Print& out) {
 
 void cmdScanBaud(Print& out) {
   const unsigned long bauds[] = {1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200};
-  unsigned long original = mbBaud;
-  out.print(F("  Skusam rychlosti, ID 1..")); out.print(SCANBAUD_MAX_ID);
-  out.println(F(" (lubovolny znak = stop)"));
+  const uint16_t configs[] = {SERIAL_8N1, SERIAL_8E1, SERIAL_8O1};
+  unsigned long origBaud = mbBaud;
+  uint16_t origCfg = mbConfig;
+
+  out.print(F("  Skusam rychlosti x parity, ID 1..")); out.print(SCANBAUD_MAX_ID);
+  out.println(F(" (lubovolny znak = stop). Chvilu to potrva."));
 
   bool aborted = false;
-  for (unsigned int b = 0; b < sizeof(bauds) / sizeof(bauds[0]) && !aborted; b++) {
-    if (!modbusBegin(bauds[b])) continue;
-    ModbusRTUClient.setTimeout(SCAN_TIMEOUT_MS);
-    out.print(F("  ")); out.print(bauds[b]); out.print(F(": "));
-    int found = 0;
-    for (int id = 1; id <= SCANBAUD_MAX_ID; id++) {
-      if (abortRequested()) { aborted = true; break; }
-      if (probeId(id, out, false)) {
-        out.print(F("ID ")); out.print(id); out.print(F("  "));
-        found++;
+  int hits = 0;
+  for (unsigned int c = 0; c < sizeof(configs) / sizeof(configs[0]) && !aborted; c++) {
+    for (unsigned int b = 0; b < sizeof(bauds) / sizeof(bauds[0]) && !aborted; b++) {
+      if (!modbusBegin(bauds[b], configs[c])) continue;
+      ModbusRTUClient.setTimeout(SCAN_TIMEOUT_MS);
+      out.print(F("  ")); out.print(bauds[b]); out.print(' ');
+      out.print(configName(configs[c])); out.print(F(": "));
+      int found = 0;
+      for (int id = 1; id <= SCANBAUD_MAX_ID; id++) {
+        if (abortRequested()) { aborted = true; break; }
+        if (probeId(id, out, false)) {
+          out.print(F("ID ")); out.print(id); out.print(F("  "));
+          found++;
+          hits++;
+        }
+        delay(5);
       }
-      delay(5);
+      out.println(found ? F("<<< NASIEL") : F("-"));
     }
-    out.println(found ? F("") : F("-"));
   }
-  modbusBegin(original);
-  out.print(F("  Obnovene ")); out.print(original);
-  out.println(F(" baud. Nastav spravnu cez `baud <n>` a `id <n>`."));
+  modbusBegin(origBaud, origCfg);
+  out.print(F("  Obnovene ")); out.print(origBaud); out.print(' ');
+  out.println(configName(origCfg));
+  if (hits) out.println(F("  Nastav najdene cez `baud <n>`, `cfg <8n1|8e1|8o1>` a `id <n>`."));
+  else out.println(F("  Nic sa neozvalo -> sprav `diag`, problem bude v zapojeni."));
+}
+
+// ---------------------------------------------------------------------------
+//  Nízkoúrovňová diagnostika RS485 (obchádza ArduinoModbus)
+//
+//  Zmysel: rozlíšiť, či z linky prídu VOBEC nejaké bajty. Ticho = drôty,
+//  napájanie alebo adresa. Zmätky = zlý baud/parita. Platný rámec s chybou
+//  = komunikácia ide a problém je inde.
+// ---------------------------------------------------------------------------
+uint16_t modbusCrc(const uint8_t* buf, int len) {
+  uint16_t crc = 0xFFFF;
+  for (int i = 0; i < len; i++) {
+    crc ^= buf[i];
+    for (int b = 0; b < 8; b++) {
+      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+    }
+  }
+  return crc;
+}
+
+void printHexByte(Print& out, uint8_t b) {
+  if (b < 0x10) out.print('0');
+  out.print((unsigned int)b, HEX);
+}
+
+// Prepne port z ArduinoModbus na priamy RS485 prístup
+void rawBegin() {
+  if (mbStarted) { ModbusRTUClient.end(); mbStarted = false; }
+  applyDelays(mbBaud);
+  RS485.begin(mbBaud, mbConfig);
+  RS485.receive();
+}
+
+void rawEnd(Print& out) {
+  RS485.noReceive();
+  RS485.end();
+  if (!modbusBegin(mbBaud, mbConfig)) out.println(F("  ! Modbus sa nepodarilo obnovit"));
+}
+
+// Vráti počet prijatých bajtov, vypíše ich v hexe
+int rawListen(unsigned long ms, Print& out) {
+  uint8_t rx[64];
+  int n = 0;
+  unsigned long t0 = millis();
+  unsigned long lastByte = 0;
+  while (millis() - t0 < ms) {
+    if (RS485.available()) {
+      int c = RS485.read();
+      if (c >= 0 && n < (int)sizeof(rx)) rx[n++] = (uint8_t)c;
+      lastByte = millis();
+    } else if (n && millis() - lastByte > 50) {
+      break;  // rámec dojazdil
+    }
+  }
+  if (n == 0) {
+    out.println(F("  <ticho – neprisiel ani jeden bajt>"));
+    return 0;
+  }
+  out.print(F("  RX ")); out.print(n); out.print(F(" B: "));
+  for (int i = 0; i < n; i++) { printHexByte(out, rx[i]); out.print(' '); }
+  out.println();
+  if (n >= 4) {
+    uint16_t crc = modbusCrc(rx, n - 2);
+    uint16_t got = rx[n - 2] | ((uint16_t)rx[n - 1] << 8);
+    if (crc == got) {
+      out.print(F("  CRC OK – platny ramec od ID ")); out.print(rx[0]);
+      if (rx[1] & 0x80) {
+        out.print(F(", ale VYNIMKA 0x")); printHexByte(out, rx[2]);
+        out.println(F("  (1=zla funkcia, 2=zla adresa registra, 3=zla hodnota)"));
+      } else {
+        out.print(F(", funkcia 0x")); printHexByte(out, rx[1]); out.println();
+      }
+    } else {
+      out.println(F("  ! CRC nesedi – skor zly baud/parita alebo ruseny signal"));
+    }
+  }
+  return n;
+}
+
+// `raw <hex>...` – pošle bajty, CRC doplní sám
+void cmdRaw(int argc, char** argv, Print& out) {
+  if (argc < 3) {
+    out.println(F("  Pouzitie: raw <bajt> <bajt> ...  (hex, CRC sa doplni)"));
+    out.println(F("  Napr. `raw 01 01 00 00 00 08` = citaj 8 coilov z ID 1"));
+    return;
+  }
+  uint8_t frame[32];
+  int len = 0;
+  for (int i = 1; i < argc && len < (int)sizeof(frame) - 2; i++) {
+    char* end;
+    long v = strtol(argv[i], &end, 16);
+    if (*end != '\0' || v < 0 || v > 0xFF) {
+      out.print(F("  ! Neplatny bajt: ")); out.println(argv[i]);
+      return;
+    }
+    frame[len++] = (uint8_t)v;
+  }
+  uint16_t crc = modbusCrc(frame, len);
+  frame[len++] = crc & 0xFF;
+  frame[len++] = crc >> 8;
+
+  out.print(F("  TX: "));
+  for (int i = 0; i < len; i++) { printHexByte(out, frame[i]); out.print(' '); }
+  out.println();
+
+  rawBegin();
+  RS485.beginTransmission();
+  RS485.write(frame, len);
+  RS485.endTransmission();
+  RS485.receive();
+  rawListen(1000, out);
+  rawEnd(out);
+}
+
+// `sniff [s]` – iba počúva, či na linke niečo je
+void cmdSniff(int argc, char** argv, Print& out) {
+  unsigned long secs = 5;
+  if (argc >= 2) {
+    bool ok;
+    long v = toNum(argv[1], &ok);
+    if (ok && v >= 1 && v <= 60) secs = v;
+  }
+  out.print(F("  Pocuvam ")); out.print(secs);
+  out.print(F(" s @ ")); out.print(mbBaud); out.print(' ');
+  out.println(configName(mbConfig));
+  rawBegin();
+  int n = rawListen(secs * 1000, out);
+  rawEnd(out);
+  if (n == 0) out.println(F("  (na linke nikto nevysiela – normalne, ak je modul slave)"));
+}
+
+// Poskladá diagnostiku dokopy
+void cmdDiag(Print& out) {
+  out.println(F("\n--- Diagnostika RS485 ---"));
+  out.print(F("Opta vysiela @ ")); out.print(mbBaud); out.print(' ');
+  out.print(configName(mbConfig)); out.print(F(", oslovuje ID ")); out.println(mbId);
+
+  // 1. Skúsime surový rámec "čítaj 1 coil" a pozrieme sa, či niečo príde
+  uint8_t frame[8] = {(uint8_t)mbId, 0x01, 0x00, 0x00, 0x00, 0x01};
+  uint16_t crc = modbusCrc(frame, 6);
+  frame[6] = crc & 0xFF;
+  frame[7] = crc >> 8;
+
+  out.println(F("\n1) Surovy dotaz (FC01, 1 coil):"));
+  out.print(F("  TX: "));
+  for (int i = 0; i < 8; i++) { printHexByte(out, frame[i]); out.print(' '); }
+  out.println();
+
+  rawBegin();
+  RS485.beginTransmission();
+  RS485.write(frame, 8);
+  RS485.endTransmission();
+  RS485.receive();
+  int n = rawListen(1000, out);
+  rawEnd(out);
+
+  out.println(F("\n2) Co s tym:"));
+  if (n == 0) {
+    out.println(F("  Ticho. Fyzicka vrstva alebo adresa. Skontroluj po rade:"));
+    out.println(F("   - ma tvoja Opta vobec RS485? Opta Lite ho NEMA (len RS485/WiFi verzia)"));
+    out.println(F("   - je modul napajany? (zakladna verzia 5 V, verzie B/D 7-36 V)"));
+    out.println(F("   - spolocna zem: Opta COM <-> GND modulu (bez nej to casto nejde)"));
+    out.println(F("   - PREHOD A a B – najcastejsia pricina"));
+    out.println(F("   - `scanbaud` prejde rychlosti aj parity a vsetky adresy"));
+  } else {
+    out.println(F("  Nieco prislo – fyzicka vrstva FUNGUJE."));
+    out.println(F("  Ak CRC nesedi, sprav `scanbaud` (zly baud alebo parita)."));
+    out.println(F("  Ak je to vynimka 0x02, modul ma iny rozsah adries – skus `probe`."));
+  }
+  out.println();
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +799,8 @@ void cmdWs(int argc, char** argv, Print& out) {
 void cmdMb(int argc, char** argv, Print& out) {
   if (argc == 1) {
     out.print(F("  Modbus: ID ")); out.print(mbId);
-    out.print(F(", ")); out.print(mbBaud); out.print(F(" baud, kanalov "));
+    out.print(F(", ")); out.print(mbBaud); out.print(' ');
+    out.print(configName(mbConfig)); out.print(F(", kanalov "));
     out.print(extCount); out.print(F(", coil offset ")); out.println(RELAY_COIL_OFFSET);
     return;
   }
@@ -683,6 +885,22 @@ void handleCommand(char* line, Print& out) {
     cmdMb(argc, argv, out);
   } else if (strcmp(c, "probe") == 0) {
     cmdProbe(out);
+  } else if (strcmp(c, "diag") == 0) {
+    cmdDiag(out);
+  } else if (strcmp(c, "raw") == 0) {
+    cmdRaw(argc, argv, out);
+  } else if (strcmp(c, "sniff") == 0) {
+    cmdSniff(argc, argv, out);
+  } else if (strcmp(c, "cfg") == 0) {
+    uint16_t cfg;
+    if (argc < 2) { out.print(F("  Aktualne: ")); out.println(configName(mbConfig)); return; }
+    if (strcmp(argv[1], "8n1") == 0) cfg = SERIAL_8N1;
+    else if (strcmp(argv[1], "8e1") == 0) cfg = SERIAL_8E1;
+    else if (strcmp(argv[1], "8o1") == 0) cfg = SERIAL_8O1;
+    else if (strcmp(argv[1], "8n2") == 0) cfg = SERIAL_8N2;
+    else { out.println(F("  ! cfg 8n1 | 8e1 | 8o1 | 8n2")); return; }
+    if (modbusBegin(mbBaud, cfg)) { out.print(F("  Format = ")); out.println(configName(cfg)); }
+    else out.println(F("  ! Nepodarilo sa"));
   } else if (strcmp(c, "ws") == 0) {
     cmdWs(argc, argv, out);
   } else if (strcmp(c, "count") == 0) {
@@ -738,7 +956,8 @@ void setup() {
   Serial.println(F("\n=== Opta relay test ==="));
   if (modbusBegin(mbBaud)) {
     Serial.print(F("Modbus RTU OK: ")); Serial.print(mbBaud);
-    Serial.print(F(" baud, modul ID ")); Serial.println(mbId);
+    Serial.print(' '); Serial.print(configName(mbConfig));
+    Serial.print(F(", modul ID ")); Serial.println(mbId);
   } else {
     Serial.println(F("! Modbus RTU sa nepodarilo spustit"));
   }
@@ -748,7 +967,7 @@ void setup() {
   if (mbStarted) {
     int n = extProbeCount();
     if (n == 0) {
-      Serial.println(F("! Modul neodpoveda – skus `scan`, `scanbaud`, alebo prehod A/B"));
+      Serial.println(F("! Modul neodpoveda – napis `diag`"));
     } else if (n != extCount) {
       Serial.print(F("! Modul hlasi ")); Serial.print(n);
       Serial.print(F(" kanalov (config.h ma ")); Serial.print(extCount);

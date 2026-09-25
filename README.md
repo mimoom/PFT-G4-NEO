@@ -92,14 +92,43 @@ a riadi sa tým, čo hlási hardvér. Ak vypíše iné číslo, než máš v con
 prepíš `RELAY_MODULE_COUNT` na hlásenú hodnotu. Ručne sa dá nastaviť aj
 príkazom `count <n>`.
 
-## Keď modul neodpovedá
+## Keď komunikácia nejde
 
-- `scan` prejde adresy 1..247 na aktuálnom baude, `scanbaud` skúsi bežné
-  rýchlosti pre adresy 1..16.
-- Prehoď A/B, over napájanie modulu a spoločnú zem.
-- Surové Modbus príkazy na skúmanie:
-  `mb rc 1 0 8` (čítaj 8 coilov), `mb wc 1 0 1` (zapíš coil 0),
-  `mb rh 1 0x4000 1` (adresa zariadenia), `mb rh 1 0x8000 1` (verzia).
+Napíš **`diag`**. Pošle surový Modbus rámec mimo knižnice a vypíše presne
+to, čo príde späť. Podľa výsledku vieš, kde hľadať:
+
+| Čo `diag` vypíše | Kde je problém |
+|---|---|
+| `<ticho – neprisiel ani jeden bajt>` | fyzická vrstva: drôty, napájanie, adresa |
+| bajty prídu, ale `CRC nesedi` | zlý baud alebo parita → `scanbaud` |
+| `CRC OK` + `VYNIMKA 0x02` | komunikácia ide, len sedí iný rozsah adries → `probe` |
+| `CRC OK`, funkcia bez chyby | funguje to |
+
+### Keď je ticho, prejdi po rade
+
+1. **Má tvoja Opta vôbec RS485?** *Opta Lite ho nemá* — svorky A/B/COM sú
+   len na verziách **Opta RS485** a **Opta WiFi**. Toto je najčastejší
+   dôvod, prečo „to nikdy nešlo".
+2. **Napájanie modulu.** Základná verzia 5 V, verzie **(B)/(D)** 7–36 V.
+   Z RS485 sa modul nenapája.
+3. **Spoločná zem.** `COM` na Opte ↔ `GND` modulu. Bez nej to často
+   nejde vôbec, alebo len nespoľahlivo.
+4. **Prehoď A a B.** Značenie nie je medzi výrobcami jednotné a toto je
+   druhá najčastejšia príčina. Skúsiť to trvá 10 sekúnd.
+5. **`scanbaud`** — prejde rýchlosti × parity × adresy 1–16. Ak sa niečo
+   ozve, máš nastavenia; ak nič, problém je fyzický (body 1–4).
+6. **Terminátor 120 Ω** — až pri dlhšom vedení. Waveshare ho má na doske
+   jumperom.
+
+### Ručné skúšanie
+
+```
+> raw 01 01 00 00 00 08    surový rámec, CRC sa doplní samo
+> sniff 10                 10 s len počúva, čo je na linke
+> cfg 8e1                  prepne paritu na strane Opty
+> mb rh 1 0x4000 1         adresa zariadenia
+> mb rh 1 0x8000 1         verzia firmvéru
+```
 
 ## Ďalší krok – sieť
 
