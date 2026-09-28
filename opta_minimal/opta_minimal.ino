@@ -52,38 +52,42 @@ bool readState() {
 //                             (typicky pokles napajania pri zopnuti cievky)
 //   - rele je nezmenene    -> prikaz vobec nedosiel
 bool setRelay(int channel, bool on) {
-  bool ok = ModbusRTUClient.coilWrite(SLAVE_ID, channel - 1, on ? 1 : 0);
-
   Serial.print("rele ");
   Serial.print(channel);
   Serial.print(on ? " ZAP  -> " : " VYP  -> ");
 
-  if (ok) {
+  if (ModbusRTUClient.coilWrite(SLAVE_ID, channel - 1, on ? 1 : 0)) {
     state[channel - 1] = on;
     Serial.println("OK");
     return true;
   }
 
-  Serial.print("CHYBA: ");
-  const char* err = ModbusRTUClient.lastError();
-  Serial.println(err ? err : "(neznama)");
+  // lastError() prepise dalsia poziadavka, tak si ho odlozime
+  char err[48];
+  const char* e = ModbusRTUClient.lastError();
+  strncpy(err, e ? e : "(neznama)", sizeof(err) - 1);
+  err[sizeof(err) - 1] = '\0';
 
   delay(150);                       // nech sa napajanie modulu stihne zotavit
-  Serial.print("   overenie: ");
   if (!readState()) {
-    Serial.println("modul neodpoveda ani na citanie");
+    Serial.print("CHYBA: ");
+    Serial.print(err);
+    Serial.println(" – a modul neodpoveda ani na citanie");
     return false;
   }
 
   if (state[channel - 1] == on) {
-    // Prikaz dosiel, iba odpoved sa stratila. Stav je overeny citanim,
-    // takze to nie je chyba – len sme o odpoved prisli.
-    Serial.println("rele je v cielovom stave -> prikaz presiel, "
-                   "stratila sa len odpoved");
+    // Prikaz dosiel, rele je tam, kde ma byt – stratila sa len odpoved.
+    // Na tomto module sa to deje pri zapinani: rozbeh cievky stiahne 5 V
+    // a modul uz nema z coho odvysielat odpoved. Nie je to chyba riadenia,
+    // ale patri to opravit na napajani (viac v README).
+    Serial.println("OK (odpoved sa stratila, stav overeny citanim)");
     return true;
   }
 
-  Serial.println("rele je nezmenene -> prikaz vobec NEDOSIEL, skusam znovu");
+  Serial.print("CHYBA: ");
+  Serial.print(err);
+  Serial.println(" – rele nezmenene, skusam znovu");
   if (ModbusRTUClient.coilWrite(SLAVE_ID, channel - 1, on ? 1 : 0)) {
     state[channel - 1] = on;
     Serial.println("   druhy pokus: OK");

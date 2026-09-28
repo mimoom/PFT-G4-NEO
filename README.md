@@ -119,8 +119,14 @@ zapnutie hádže timeout.** Pomáha:
 - elektrolytický kondenzátor 470–1000 µF priamo na svorkách 5 V/GND
 - viesť RS485 pár ďalej od relé časti
 
-Skica si po zlyhanom zápise načíta skutočný stav, takže stratenú
-odpoveď rozozná od nedoručeného príkazu a zbytočne nehlási chybu.
+**Overené na stole:** relé zopne a stav drží — stráca sa naozaj len
+odpoveď, nie príkaz. Skica si po zlyhanom zápise načíta skutočný stav
+a vypíše `OK (odpoved sa stratila, stav overeny citanim)`. Riadenie
+teda funguje aj bez zásahu do napájania.
+
+Napriek tomu to opraviť treba, skôr než sa na kontakty pripojí niečo
+skutočné: `a` (všetkých 8 naraz) berie ~544 mA v jednom kroku, a modul,
+ktorý si podreže napájanie, môže raz stratiť aj príkaz, nielen odpoveď.
 
 ## Časovanie RS485 — dôležité
 
