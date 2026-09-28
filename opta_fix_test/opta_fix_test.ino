@@ -1,52 +1,56 @@
 // ============================================================================
-//  Co presne sposobuje timeout pri zapinani rele?
+//  DOKAZ PRICINY: prilis kratky post-delay orezava koniec ramca
 //
-//  Zapis ON hadze timeout, zapis OFF prejde, citanie ide spolahlivo
-//  a rele pritom naozaj zopne a drzi. Su dve mozne priciny a kazda sa
-//  opravuje inak:
+//  UART vysiela LSB first, takze ako posledne idu bity 7 a 6 posledneho
+//  bajtu (horny bajt CRC). Pri 9600 trva jeden znak 1042 us, ale flush()
+//  sa vrati skor, nez znak fyzicky odide. S post-delay 800 us spadne DE
+//  asi 2 bity predcasne a tie sa strati – linka ide do idle, co je log. 1.
 //
-//    A) odpoved sa STRATI  – modulu klesne napajanie pri rozbehu cievky
-//                            -> oprava na hardveri (kondenzator, zdroj)
-//    B) odpoved len MESKA  – modul odpoveda az po zopnuti rele
-//                            -> oprava v kode (dlhsi timeout)
+//    ramec konciaci jednotkami -> prezije (idle je tiez 1)
+//    ramec konciaci nulami     -> znici sa, CRC nesedi, modul mlci
 //
-//  Tento sketch spusti tri pokusy a povie, ktora to je. Nic nekupuj,
-//  kym to nedobehne.
+//  Preto zlyhava "rele 1 ZAP" (CRC konci 0x3A = ...00), ale "rele 1 VYP"
+//  (0xCA = ...11) prejde. A preto mal tuner s citanim 8/8 – citaci ramec
+//  konci 0xCC = ...11.
 //
-//  Rele 1 pocas testu niekolkokrat cvakne. Nic ine sa nedeje.
+//  Test spusti tie iste styri prikazy dvakrat: raz so zlym post-delay,
+//  raz so spravnym. Pri 800 us musi rele 2 ist ZAPNUT ale nie VYPNUT,
+//  teda presne naopak nez rele 1. Ak to tak vyjde, pricina je dokazana.
+//
+//  Rele 1 a 2 budu pocas testu cvakat.
 // ============================================================================
 
 #include <ArduinoRS485.h>
 #include <ArduinoModbus.h>
 
-const int SLAVE_ID = 1;
-const int COIL     = 0;       // rele 1
+const int  SLAVE_ID = 1;
+const long BAUD     = 9600;
 
-// Zapise coil, zmeria ako dlho to trvalo, vypise vysledok. Vrati true = OK.
-bool tryWrite(bool on, int timeoutMs, const char* popis) {
-  ModbusRTUClient.setTimeout(timeoutMs);
+bool started = false;
 
-  unsigned long t0 = millis();
-  bool ok = ModbusRTUClient.coilWrite(SLAVE_ID, COIL, on ? 1 : 0);
-  unsigned long ms = millis() - t0;
+void useDelay(int postUs) {
+  if (started) ModbusRTUClient.end();
+  RS485.setDelays(500, postUs);
+  started = ModbusRTUClient.begin(BAUD, SERIAL_8N1);
+  ModbusRTUClient.setTimeout(400);
+  delay(50);
+}
 
-  Serial.print("  ");
-  Serial.print(popis);
-  Serial.print(" (timeout ");
-  Serial.print(timeoutMs);
-  Serial.print(" ms) -> ");
-  if (ok) {
-    Serial.print("OK za ");
-    Serial.print(ms);
-    Serial.println(" ms");
-  } else {
-    Serial.print("CHYBA po ");
-    Serial.print(ms);
-    Serial.print(" ms: ");
-    const char* e = ModbusRTUClient.lastError();
-    Serial.println(e ? e : "(neznama)");
-  }
-  return ok;
+// Vypise vysledok vedla predpovede. Vrati true, ak sa zhoduju.
+bool step(int relay, bool on, bool expectOk) {
+  bool ok = ModbusRTUClient.coilWrite(SLAVE_ID, relay - 1, on ? 1 : 0);
+
+  Serial.print("  rele ");
+  Serial.print(relay);
+  Serial.print(on ? " ZAP  " : " VYP  ");
+  Serial.print("predpoved: ");
+  Serial.print(expectOk ? "prejde" : "zlyha ");
+  Serial.print("   realita: ");
+  Serial.print(ok ? "prejde" : "zlyha ");
+  Serial.println(ok == expectOk ? "   <- sedi" : "   <- NESEDI");
+
+  delay(300);
+  return ok == expectOk;
 }
 
 void setup() {
@@ -54,63 +58,49 @@ void setup() {
   unsigned long t0 = millis();
   while (!Serial && millis() - t0 < 3000) {}
 
-  Serial.println("\n=== Preco zlyhava zapinanie? ===\n");
+  Serial.println("\n=== Dokaz: orezany koniec ramca ===");
 
-  RS485.setDelays(500, 800);
-  if (!ModbusRTUClient.begin(9600, SERIAL_8N1)) {
-    Serial.println("Modbus sa nepodarilo spustit – stop.");
-    while (true) delay(1000);
-  }
+  // --- Zly post-delay: 800 us < 1042 us (dlzka znaku pri 9600) ----------
+  Serial.println("\npost-delay 800 us (kratsi nez znak – koniec sa oreze):");
+  useDelay(800);
+  int sedi = 0;
+  sedi += step(1, true,  false);   // CRC 0x3A = ...00  -> ma zlyhat
+  sedi += step(2, true,  true);    // CRC 0xFA = ...11  -> ma prejst
+  sedi += step(1, false, true);    // CRC 0xCA = ...11  -> ma prejst
+  sedi += step(2, false, false);   // CRC 0x0A = ...00  -> ma zlyhat
 
-  // --- Vychodzi stav: rele VYP ------------------------------------------
-  Serial.println("Priprava:");
-  tryWrite(false, 500, "vypnut rele");
-  delay(400);
-
-  // --- Pokus 1: zapnutie, kratky timeout (takto to zlyhava) -------------
-  Serial.println("\nPokus 1 – zapnutie (cievka sa rozbieha):");
-  bool p1 = tryWrite(true, 500, "zapnut");
-  delay(400);
-
-  // --- Pokus 2: zapnutie rele, ktore UZ JE zapnute ----------------------
-  //     Rovnaky ramec, rovnaka funkcia, rovnaka hodnota – ale cievka uz
-  //     bezi, takze ziadny rozbehovy prud. Ak toto prejde a pokus 1 nie,
-  //     problem je viazany na rozbeh cievky, nie na obsah prikazu.
-  Serial.println("\nPokus 2 – to iste na uz zapnutom rele (bez rozbehu):");
-  bool p2 = tryWrite(true, 500, "zapnut znovu");
-  delay(400);
-
-  // --- Pokus 3: zapnutie s velmi dlhym timeoutom ------------------------
-  Serial.println("\nPokus 3 – zapnutie, ale cakame az 3 s:");
-  tryWrite(false, 500, "najprv vypnut");
-  delay(400);
-  bool p3 = tryWrite(true, 3000, "zapnut");
+  // --- Spravny post-delay: 1500 us > 1042 us ----------------------------
+  Serial.println("\npost-delay 1500 us (cely znak stihne odist):");
+  useDelay(1500);
+  int okAll = 0;
+  okAll += step(1, true,  true);
+  okAll += step(2, true,  true);
+  okAll += step(1, false, true);
+  okAll += step(2, false, true);
 
   // --- Zaver ------------------------------------------------------------
   Serial.println("\n================ ZAVER ================");
+  Serial.print("Pri 800 us sedeli ");
+  Serial.print(sedi);
+  Serial.println("/4 predpovede.");
+  Serial.print("Pri 1500 us preslo ");
+  Serial.print(okAll);
+  Serial.println("/4 prikazov.");
 
-  if (p1) {
-    Serial.println("Pokus 1 presiel – chyba sa prave teraz neprejavila.");
-    Serial.println("Nechaj bezat opta_minimal a skus to znovu.");
-  } else if (p3) {
-    Serial.println("Odpoved iba MESKALA – prisla, len neskoro.");
-    Serial.println("OPRAVA: v kode zvys timeout, hardver netreba:");
-    Serial.println("   ModbusRTUClient.setTimeout(1000);");
-  } else if (p2) {
-    Serial.println("Bez rozbehu cievky to ide, s rozbehom nie,");
-    Serial.println("a ani dlhe cakanie nepomoze -> odpoved sa naozaj STRATI.");
-    Serial.println("OPRAVA na napajani modulu:");
-    Serial.println("   1. zmeraj 5 V priamo na svorkach, ked je rele zopnute");
-    Serial.println("   2. elektrolyt 470-1000 uF na svorky 5 V / GND");
-    Serial.println("   3. silnejsi zdroj (min 1 A) a kratsie hrubsie vodice");
+  if (okAll == 4) {
+    Serial.println("\nOPRAVENE. Pouzi RS485.setDelays(500, 1500).");
+    if (sedi == 4) {
+      Serial.println("Aj predpovede pri 800 us sedeli – pricina potvrdena:");
+      Serial.println("post-delay musi byt dlhsi nez jeden znak (pri 9600 = 1042 us).");
+    }
   } else {
-    Serial.println("Zlyhalo aj zapnutie bez rozbehu cievky.");
-    Serial.println("Potom to nesuvisi s cievkou – problem je v komunikacii");
-    Serial.println("samotnej. Spusti opta_relay_test a napis tam `diag`.");
+    Serial.println("\n1500 us nestacilo. Skus 2000 us; ak ani to,");
+    Serial.println("spusti opta_rs485_tune a premeraj cele okno.");
   }
   Serial.println("=======================================");
 
-  tryWrite(false, 1000, "\nupratanie: vypnut rele");
+  ModbusRTUClient.coilWrite(SLAVE_ID, 0, 0);
+  ModbusRTUClient.coilWrite(SLAVE_ID, 1, 0);
 }
 
 void loop() {}

@@ -117,15 +117,54 @@ DE ▔▔▔▔▔▔▔▔▔╲__________________
 - **pre** — po zapnutí vysielača chvíľu čakať, nech sa linka ustáli.
 - **post** — po odoslaní ešte chvíľu držať vysielač zapnutý.
 
-`post` je citlivé a má úzke okno (namerané `opta_rs485_tune`):
+`post` je citlivé a má úzke okno:
 
 - **príliš krátke** → vysielač sa vypne skôr, než posledný bajt fyzicky
   odíde z UARTu. Koniec rámca sa odreže, CRC nesedí, modul mlčí.
 - **príliš dlhé** → Opta ešte drží linku, keď už modul odpovedá.
   Prekričí mu začiatok odpovede → `Invalid CRC`, `Invalid data`.
 
-Nastavené `RS485.setDelays(500, 800)`. Vzorec z oficiálneho Arduino
-príkladu dá 3500 µs a s týmto modulom **nefunguje**.
+Nastavené `RS485.setDelays(500, 1500)`. Vzorec z oficiálneho Arduino
+príkladu dá 3500 µs a je už **za** horným okrajom.
+
+### Prečo krátky post-delay vyzerá ako „niektoré príkazy nechodia"
+
+Toto stojí za pochopenie, lebo príznak je zákerný. UART vysiela **LSB
+first**, takže ako úplne posledné idú bity 7 a 6 posledného bajtu. Keď
+DE spadne predčasne, tieto bity sa stratia a linka ide do **idle, čo je
+logická 1**.
+
+```
+posledny bajt 0xCA = 11001010
+vysiela sa:  start 0 1 0 1 0 0 1 1 stop
+                            └─┴─ posledne bity = 1,1
+             ak DE spadne teraz, idle je tiez 1 -> bajt prezije
+
+posledny bajt 0x3A = 00111010
+vysiela sa:  start 0 1 0 1 1 1 0 0 stop
+                            └─┴─ posledne bity = 0,0
+             ak DE spadne teraz, idle ich prepise na 1 -> CRC nesedi
+```
+
+Pri 9600 trvá jeden znak **1042 µs** (10 bitov). S `post = 800 µs` sa
+orežú približne posledné 2 bity — a či to vadí, závisí **od hodnoty CRC
+daného rámca**:
+
+| Príkaz | posl. bajt | koncové bity | výsledok |
+|---|---|---|---|
+| čítaj coily | `0xCC` | 1,1 | prejde |
+| relé 1 VYP | `0xCA` | 1,1 | prejde |
+| relé 1 ZAP | `0x3A` | 0,0 | zlyhá |
+| relé 2 ZAP | `0xFA` | 1,1 | prejde |
+| relé 2 VYP | `0x0A` | 0,0 | zlyhá |
+
+Vyzerá to ako logická chyba („zapínanie nejde, vypínanie áno"), pritom
+je to čisto elektrické a závisí od náhodnej hodnoty kontrolného súčtu.
+
+**Ponaučenie:** časovanie sa nedá odmerať jedným typom rámca. Prvá
+verzia `opta_rs485_tune` iba čítala, dostala 8/8 a potvrdila nastavenie,
+ktoré v skutočnosti polovicu zápisov ničilo. Teraz testuje čítanie aj
+zápis končiaci nulami.
 
 ## Kde sa to dá pokaziť
 

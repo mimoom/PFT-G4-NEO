@@ -16,16 +16,21 @@
 #define MODBUS_SERIAL_CONFIG SERIAL_8N1
 
 // Oneskorenia okolo vysielania (DE/RE). NEmenit od oka – existuje uzke okno.
-// Namerane na Opta WiFi + Waveshare 8CH pri 9600 8N1 (opta_rs485_tune):
-//   post 0 / 50 / 200 us  -> 0/8   modul vobec neodpovie
-//   post 800 us           -> 8/8   funguje
-//   post 3500 us          -> chyby CRC, rozsynchronizovanie
-// Dolna hranica: flush() sa na Opte vrati skor, nez posledny bajt odide
-// z UARTu; ked DE spadne hned, koniec ramca sa odreze a modul mlci.
-// Horna hranica: Opta este drzi linku, ked uz modul zacal odpovedat.
+//
+// DOLNA hranica: flush() sa vrati skor, nez posledny bajt fyzicky odide
+// z UARTu. Ked DE spadne predcasne, orezu sa posledne bity ramca. UART
+// vysiela LSB first, takze ako posledne idu bity 7 a 6 posledneho bajtu,
+// a linka po uvolneni ide do idle = log. 1. Ramec konciaci jednotkami to
+// teda prezije, ramec konciaci nulami nie – a to vyzera ako "niektore
+// prikazy chodia a ine nie". Preto musi byt post > dlzka jedneho znaku
+// (10 bitov; pri 9600 = 1042 us).
+//
+// HORNA hranica: Opta este drzi linku, ked uz modul zacal odpovedat
+// (3500 us z oficialneho Arduino prikladu je uz vela) -> Invalid CRC.
+//
 // Hodnota `pre` nie je kriticka (50 aj 500 us fungovali rovnako).
 #define RS485_PRE_DELAY_US   500
-#define RS485_POST_DELAY_US  800
+#define RS485_POST_CHAR_MULT 3 / 2   // post = 1.5 x dlzka znaku
 #define MODBUS_TIMEOUT_MS    300     // timeout bežnej požiadavky
 #define SCAN_TIMEOUT_MS      60      // timeout pri skenovaní adries
 #define SCANBAUD_MAX_ID      16      // `scanbaud` skúša adresy 1..SCANBAUD_MAX_ID

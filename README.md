@@ -7,11 +7,16 @@ z Serial Monitora. Sieťové ovládanie (HTTP/MQTT) príde až potom.
 ## Čo je v repozitári
 
 ```
-opta_relay_test/
-  opta_relay_test.ino   skica – príkazová konzola cez Serial Monitor
-  config.h              všetko nastaviteľné (baud, Modbus ID, prahy, názvy)
-  MAPOVANIE.md          tabuľky na zapísanie, čo je na čo zapojené
+opta_minimal/       elementárne ovládanie – stlač 1-8, prepne sa relé
+opta_relay_test/    plná konzola: mapovanie, vstupy, diagnostika
+  config.h            všetko nastaviteľné (baud, Modbus ID, prahy, názvy)
+  MAPOVANIE.md        tabuľky na zapísanie, čo je na čo zapojené
+opta_rs485_tune/    merač časovania RS485
+opta_fix_test/      dôkaz príčiny orezaných rámcov
+KOMUNIKACIA.md      ako funguje Modbus RTU na tejto linke
 ```
+
+**Začni s `opta_minimal`** — je to jedna obrazovka kódu.
 
 ## Príprava
 
@@ -96,62 +101,34 @@ príkazom `count <n>`.
 
 **Waveshare Industrial Modbus RTU 8-ch Relay Module, RS485, multi
 isolation** — základná verzia, napájanie **5 V** (verzie *(B)* a *(D)*
-majú 7–36 V, táto nie).
-
-| Parameter | Hodnota |
-|---|---|
-| Napájanie | 5 V |
-| Odber v pokoji | 0,18 W ≈ 36 mA |
-| Odber so všetkými relé | 2,9 W ≈ **580 mA** |
-| Jedna cievka | ~68 mA navyše |
-| Kontakty | 10 A 250 V AC / 30 V DC |
-| Z výroby | 9600 8N1, adresa 1 |
-
-Zdroj musí utiahnuť aspoň **1 A** a vodiče majú byť krátke a hrubé.
-RS485 je na module *izolovaný* a jeho vysielač je napájaný cez DC-DC
-z tej istej 5 V vetvy ako cievky — keď zopnutie cievky stiahne napätie,
-modul nestihne odpovedať a zápis skončí na timeout, hoci relé zoplo.
-
-Príznak je typický: **čítanie ide spoľahlivo, vypnutie relé ide,
-zapnutie hádže timeout.** Pomáha:
-
-- silnejší 5 V zdroj a kratšie vodiče
-- elektrolytický kondenzátor 470–1000 µF priamo na svorkách 5 V/GND
-- viesť RS485 pár ďalej od relé časti
-
-**Overené na stole:** relé zopne a stav drží — stráca sa naozaj len
-odpoveď, nie príkaz. Skica si po zlyhanom zápise načíta skutočný stav
-a vypíše `OK (odpoved sa stratila, stav overeny citanim)`. Riadenie
-teda funguje aj bez zásahu do napájania.
-
-Napriek tomu to opraviť treba, skôr než sa na kontakty pripojí niečo
-skutočné: `a` (všetkých 8 naraz) berie ~544 mA v jednom kroku, a modul,
-ktorý si podreže napájanie, môže raz stratiť aj príkaz, nielen odpoveď.
+majú 7–36 V, táto nie). Kontakty 10 A 250 V AC / 30 V DC.
+Z výroby: 9600 8N1, adresa 1.
 
 ## Časovanie RS485 — dôležité
 
-Vzorec z oficiálneho Arduino príkladu pre Optu
-(`bitDuration * 9.6 * 3.5 * 1e6`) dá pri 9600 baud **3500 µs** post-delay
-a **s týmto modulom nefunguje**. Namerané hodnoty (`opta_rs485_tune`):
+`RS485.setDelays(500, 1500)`. Post-delay **musí prekryť celý posledný
+znak** — pri 9600 baud trvá znak 1042 µs. `flush()` sa vráti skôr, než
+bajt fyzicky odíde z UARTu, takže pri kratšom post-delay spadne DE
+predčasne a koncové bity rámca sa odrežú.
 
-| post delay | výsledok |
-|---|---|
-| 0 / 50 / 200 µs | 0/8 — modul vôbec neodpovie |
-| **800 µs** | **8/8 — funguje** |
-| 3500 µs | chyby CRC, rozsynchronizované odpovede |
+Príznak je zákerný: UART vysiela LSB first a uvoľnená linka ide do idle
+= log. 1, takže **rámec končiaci jednotkami prežije a rámec končiaci
+nulami sa zničí**. Podľa hodnoty CRC teda niektoré príkazy chodia a iné
+nie — vyzerá to ako logická chyba, hoci je to elektrické:
 
-Je to úzke okno s dvoma rôznymi príčinami:
+| Príkaz | posl. bajt | koncové bity | pri post 800 µs |
+|---|---|---|---|
+| čítaj coily | `0xCC` | 1,1 | prejde |
+| relé 1 VYP | `0xCA` | 1,1 | prejde |
+| relé 1 ZAP | `0x3A` | 0,0 | zlyhá |
+| relé 2 ZAP | `0xFA` | 1,1 | prejde |
+| relé 2 VYP | `0x0A` | 0,0 | zlyhá |
 
-- **Dolná hranica:** `flush()` sa na Opte vráti skôr, než posledný bajt
-  fyzicky odíde z UARTu. Keď DE spadne hneď, koniec rámca sa odreže,
-  modul dostane zlé CRC a mlčí → samé timeouty.
-- **Horná hranica:** Opta stále drží vysielač, keď modul už začal
-  odpovedať. Začiatok odpovede sa zničí → `Invalid CRC`, `Invalid data`
-  a `Response not from requested slave` v pravidelnom cykle.
+Horná hranica okna je tam, kde Opta drží linku ešte v čase, keď modul
+odpovedá → `Invalid CRC`, `Invalid data`. Vzorec z oficiálneho Arduino
+príkladu dá 3500 µs a je už za ňou.
 
-Nastavené je `RS485.setDelays(500, 800)`. Hodnota `pre` nie je kritická
-(50 aj 500 µs fungovali rovnako). Pri zmene rýchlosti alebo iného modulu
-spusti `opta_rs485_tune` a premeraj to znova.
+Podrobne aj s bitovým rozpisom v [KOMUNIKACIA.md](KOMUNIKACIA.md).
 
 ## Keď komunikácia nejde
 

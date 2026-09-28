@@ -9,7 +9,13 @@
 //  Tento sketch nehada – vyskusa kombinacie pre/post delay a spocita, kolko
 //  dotazov z 8 preslo. Na konci vypise riadok, ktory si vlozis do kodu.
 //
-//  Iba CITA stav coilov (FC01), takze pocas merania nic necvaka.
+//  POZOR na to, CO sa meria. Prva verzia tohto sketchu iba citala coily
+//  a ukazala post 800 us ako bezchybny – lenze citaci ramec konci bajtom
+//  0xCC, ktoreho posledne vysielane bity su jednotky, a te prezivaju aj
+//  ked DE spadne predcasne. Zapis "rele 1 ZAP" konci 0x3A (koncove bity
+//  su nuly) a pri tom istom nastaveni zlyhaval.
+//  Preto sa teraz v kazdom pokuse testuje CITANIE aj taky ZAPIS, a pokus
+//  plati len ked prejdu oba. Rele 1 pocas merania cvaka.
 //
 //  Kniznice: ArduinoRS485, ArduinoModbus
 //  Doska:    Arduino Mbed OS Opta Boards -> Opta
@@ -48,11 +54,19 @@ int testCombo(long baud, int pre, int post) {
 
   int ok = 0;
   for (int i = 0; i < TRIES; i++) {
-    if (ModbusRTUClient.requestFrom(SLAVE_ID, COILS, 0, COILS_N)) {
-      while (ModbusRTUClient.available()) ModbusRTUClient.read();
-      ok++;
-    }
-    delay(80);   // nech ma linka pokoj medzi dotazmi
+    // 1) citanie – ramec konci jednotkami, znasa aj orezany koniec
+    bool rd = ModbusRTUClient.requestFrom(SLAVE_ID, COILS, 0, COILS_N);
+    if (rd) while (ModbusRTUClient.available()) ModbusRTUClient.read();
+    delay(40);
+
+    // 2) zapis "rele 1 ZAP" – ramec konci nulami, orezanie ho znici,
+    //    takze prave on odhali prikratky post-delay
+    bool wr = ModbusRTUClient.coilWrite(SLAVE_ID, 0, 1);
+    delay(40);
+    ModbusRTUClient.coilWrite(SLAVE_ID, 0, 0);   // upratanie, vysledok nezaujima
+
+    if (rd && wr) ok++;
+    delay(40);   // nech ma linka pokoj medzi pokusmi
   }
   return ok;
 }
@@ -83,7 +97,7 @@ void setup() {
   Serial.println("\n=== Ladenie casovania RS485 ===");
   Serial.print("Modul ID ");
   Serial.print(SLAVE_ID);
-  Serial.println(", citam 8 coilov. Pocas merania nic necvaka.\n");
+  Serial.println(", citam coily aj zapisujem rele 1. Rele bude cvakat.\n");
 
   // --- Faza 1: kombinacie oneskoreni pri 9600 -----------------------------
   Serial.println("Faza 1 – oneskorenia pri 9600 8N1:");

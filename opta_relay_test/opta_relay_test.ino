@@ -93,14 +93,12 @@ bool waitOrAbort(unsigned long ms) {
 // ---------------------------------------------------------------------------
 //  Modbus
 // ---------------------------------------------------------------------------
-// Oneskorenia okolo vysielania – hodnoty namerané, viď komentár v config.h.
-// (Vzorec z oficiálneho Arduino príkladu dá pri 9600 až 3500 us a s týmto
-// modulom nefunguje – Opta drží linku, keď už modul odpovedá.)
+// Oneskorenia okolo vysielania – viď komentár v config.h.
+// Post musí prekryť celý posledný znak, inak sa odrežú jeho koncové bity.
+// Jeden znak = 10 bitov (štart + 8 dát + stop), pri 9600 teda 1042 us.
 void applyDelays(unsigned long baud) {
-  int post = RS485_POST_DELAY_US;
-  // Pomalšie linky potrebujú dlhší chvost: dolná hranica rastie s dĺžkou bitu.
-  if (baud < 9600) post = (int)((float)RS485_POST_DELAY_US * 9600.0f / baud);
-  RS485.setDelays(RS485_PRE_DELAY_US, post);
+  unsigned long charUs = 10000000UL / baud;
+  RS485.setDelays(RS485_PRE_DELAY_US, (int)(charUs * RS485_POST_CHAR_MULT));
 }
 
 const char* configName(uint16_t cfg) {

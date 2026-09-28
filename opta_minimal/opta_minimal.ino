@@ -21,10 +21,12 @@ void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000) {}
 
-  // Kolko us drzat vysielac zapnuty pred a po odoslani ramca.
-  // 800 us je namerane – kratsie modul neodpoveda, dlhsie mu prekricime
-  // zaciatok odpovede. Nemen bez merania (opta_rs485_tune).
-  RS485.setDelays(500, 800);
+  // Ako dlho po odoslani este drzat vysielac zapnuty.
+  // MUSI byt dlhsie nez jeden znak (pri 9600 = 1042 us), lebo flush() sa
+  // vrati skor, nez posledny bajt fyzicky odide. Ked DE spadne predcasne,
+  // orezu sa posledne bity a modul dostane zly CRC – mlci.
+  // Naopak prilis dlho (3500 us) uz prekrici zaciatok jeho odpovede.
+  RS485.setDelays(500, 1500);
 
   ModbusRTUClient.begin(9600, SERIAL_8N1);
 
