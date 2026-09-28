@@ -14,6 +14,18 @@
 // ---------------------------------------------------------------------------
 #define MODBUS_BAUD          9600
 #define MODBUS_SERIAL_CONFIG SERIAL_8N1
+
+// Oneskorenia okolo vysielania (DE/RE). NEmenit od oka – existuje uzke okno.
+// Namerane na Opta WiFi + Waveshare 8CH pri 9600 8N1 (opta_rs485_tune):
+//   post 0 / 50 / 200 us  -> 0/8   modul vobec neodpovie
+//   post 800 us           -> 8/8   funguje
+//   post 3500 us          -> chyby CRC, rozsynchronizovanie
+// Dolna hranica: flush() sa na Opte vrati skor, nez posledny bajt odide
+// z UARTu; ked DE spadne hned, koniec ramca sa odreze a modul mlci.
+// Horna hranica: Opta este drzi linku, ked uz modul zacal odpovedat.
+// Hodnota `pre` nie je kriticka (50 aj 500 us fungovali rovnako).
+#define RS485_PRE_DELAY_US   500
+#define RS485_POST_DELAY_US  800
 #define MODBUS_TIMEOUT_MS    300     // timeout bežnej požiadavky
 #define SCAN_TIMEOUT_MS      60      // timeout pri skenovaní adries
 #define SCANBAUD_MAX_ID      16      // `scanbaud` skúša adresy 1..SCANBAUD_MAX_ID

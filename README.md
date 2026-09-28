@@ -92,6 +92,31 @@ a riadi sa tým, čo hlási hardvér. Ak vypíše iné číslo, než máš v con
 prepíš `RELAY_MODULE_COUNT` na hlásenú hodnotu. Ručne sa dá nastaviť aj
 príkazom `count <n>`.
 
+## Časovanie RS485 — dôležité
+
+Vzorec z oficiálneho Arduino príkladu pre Optu
+(`bitDuration * 9.6 * 3.5 * 1e6`) dá pri 9600 baud **3500 µs** post-delay
+a **s týmto modulom nefunguje**. Namerané hodnoty (`opta_rs485_tune`):
+
+| post delay | výsledok |
+|---|---|
+| 0 / 50 / 200 µs | 0/8 — modul vôbec neodpovie |
+| **800 µs** | **8/8 — funguje** |
+| 3500 µs | chyby CRC, rozsynchronizované odpovede |
+
+Je to úzke okno s dvoma rôznymi príčinami:
+
+- **Dolná hranica:** `flush()` sa na Opte vráti skôr, než posledný bajt
+  fyzicky odíde z UARTu. Keď DE spadne hneď, koniec rámca sa odreže,
+  modul dostane zlé CRC a mlčí → samé timeouty.
+- **Horná hranica:** Opta stále drží vysielač, keď modul už začal
+  odpovedať. Začiatok odpovede sa zničí → `Invalid CRC`, `Invalid data`
+  a `Response not from requested slave` v pravidelnom cykle.
+
+Nastavené je `RS485.setDelays(500, 800)`. Hodnota `pre` nie je kritická
+(50 aj 500 µs fungovali rovnako). Pri zmene rýchlosti alebo iného modulu
+spusti `opta_rs485_tune` a premeraj to znova.
+
 ## Keď komunikácia nejde
 
 Napíš **`diag`**. Pošle surový Modbus rámec mimo knižnice a vypíše presne

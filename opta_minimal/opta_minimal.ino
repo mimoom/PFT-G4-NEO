@@ -33,10 +33,13 @@ void setup() {
 
   Serial.println("\n=== Opta + Waveshare 8CH – minimalny test ===");
 
-  // Oneskorenia pred/po vysielani (3.5 znaku), odporucanie Arduina pre Optu
-  float bitDuration = 1.0f / BAUD;
-  int delayUs = (int)(bitDuration * 9.6f * 3.5f * 1e6f);
-  RS485.setDelays(delayUs, delayUs);
+  // Oneskorenia okolo vysielania. Namerane (opta_rs485_tune) pri 9600 8N1:
+  //   post 0 / 50 / 200 us -> modul vobec neodpovie (odrezany koniec ramca)
+  //   post 800 us          -> funguje
+  //   post 3500 us         -> chyby CRC (Opta drzi linku, ked modul odpoveda)
+  // Vzorec z oficialneho Arduino prikladu dava 3500 us a s tymto modulom
+  // NEFUNGUJE. Ak zmenis BAUD, over hodnoty sketchom opta_rs485_tune.
+  RS485.setDelays(500, 800);
 
   if (!ModbusRTUClient.begin(BAUD, SERIAL_8N1)) {
     Serial.println("CHYBA: Modbus sa nepodarilo spustit – stop.");
