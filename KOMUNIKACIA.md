@@ -174,3 +174,20 @@ zápis končiaci nulami.
 | `Invalid CRC`, `Invalid data` | rýchlosť, parita alebo `post` delay |
 | `Response not from requested slave` | zlá adresa, alebo odpovede sú rozsynchronizované |
 | ide čítanie, zápis hádže timeout | modulu klesá napájanie pri zopnutí cievky |
+
+## Modul si stav pamätá
+
+Relé držia svoj stav vo vlastnom hardvéri modulu. Prežijú **reset Opty,
+nahratie nového kódu aj odpojenie Opty od zbernice** — vypnú sa až keď
+im zmizne napájanie (alebo keď ich niekto vypne príkazom).
+
+Z toho plynie pravidlo: **nikdy nepredpokladaj stav relé.** Premenná
+v Opte je len kópia a po štarte nemusí sedieť. Buď si stav načítaj
+(funkcia 01), alebo ho zrovnaj do známeho stavu:
+
+```cpp
+ModbusRTUClient.coilWrite(SLAVE_ID, 0x00FF, 0);   // vypni vsetky naraz
+```
+
+To isté platí, ak by na zbernicu niekedy siahal ešte niekto iný — potom
+je čítanie skutočného stavu jediná spoľahlivá cesta.

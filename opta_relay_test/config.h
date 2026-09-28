@@ -40,7 +40,11 @@
 #define MAX_EXT_CHANNELS     32      // horný limit (Waveshare má verzie do 32 ch)
 #define RELAY_COIL_OFFSET    0       // adresa coilu pre kanál 1 (Waveshare = 0)
 
-// Po štarte vypnúť všetky relé (interné aj externé)
+// Po štarte vypnúť všetky relé (interné aj externé).
+// Externý modul si stav relé pamätá sám a prežije reset Opty aj nahratie
+// nového kódu, takže sa nikdy nesmie predpokladať, že sú vypnuté.
+// true  = zrovnaj ich pri štarte do známeho stavu (bezpečné pri ladení)
+// false = nechaj bežať a len si načítaj, ako na tom sú
 #define ALL_OFF_ON_BOOT      true
 
 // ---------------------------------------------------------------------------

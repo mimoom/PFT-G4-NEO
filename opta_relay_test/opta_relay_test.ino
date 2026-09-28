@@ -979,7 +979,12 @@ void setup() {
     }
   }
 
+  // Externý modul si stav relé pamätá – prežije reset Opty aj nahratie
+  // nového kódu. Preto ho buď zrovnáme do známeho stavu, alebo si ho
+  // načítame; predpokladať, že sú relé vypnuté, sa nesmie.
   if (ALL_OFF_ON_BOOT) allOff(Serial);
+  else if (mbStarted) extReadAll(Serial);
+
   updateInputs();
   Serial.println(F("Napis `help` pre zoznam prikazov."));
   Serial.print(F("> "));
