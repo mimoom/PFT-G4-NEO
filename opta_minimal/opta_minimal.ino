@@ -37,7 +37,20 @@ unsigned long lastStep = 0;
 //  Modbus
 // ---------------------------------------------------------------------------
 
+// Precita vsetky coily do state[]. Vrati true pri uspechu.
+bool readState() {
+  if (!ModbusRTUClient.requestFrom(SLAVE_ID, COILS, 0, CHANNELS)) return false;
+  for (int i = 0; i < CHANNELS; i++) state[i] = ModbusRTUClient.read() != 0;
+  return true;
+}
+
 // Zapise jeden coil. channel = 1..8. Vypise vysledok, vrati true pri uspechu.
+//
+// Ked zapis zlyha, este si precitame skutocny stav modulu. To rozlisi dve
+// uplne rozdielne poruchy:
+//   - rele je uz prepnute  -> prikaz DOSIEL, stratila sa len odpoved
+//                             (typicky pokles napajania pri zopnuti cievky)
+//   - rele je nezmenene    -> prikaz vobec nedosiel
 bool setRelay(int channel, bool on) {
   bool ok = ModbusRTUClient.coilWrite(SLAVE_ID, channel - 1, on ? 1 : 0);
 
@@ -48,12 +61,26 @@ bool setRelay(int channel, bool on) {
   if (ok) {
     state[channel - 1] = on;
     Serial.println("OK");
-  } else {
-    Serial.print("CHYBA: ");
-    const char* err = ModbusRTUClient.lastError();
-    Serial.println(err ? err : "(neznama)");
+    return true;
   }
-  return ok;
+
+  Serial.print("CHYBA: ");
+  const char* err = ModbusRTUClient.lastError();
+  Serial.println(err ? err : "(neznama)");
+
+  delay(150);                       // nech sa napajanie modulu stihne zotavit
+  Serial.print("   overenie: ");
+  if (!readState()) {
+    Serial.println("modul neodpoveda ani na citanie");
+    return false;
+  }
+
+  bool actual = state[channel - 1];
+  Serial.print("rele je ");
+  Serial.print(actual ? "ZAP" : "VYP");
+  Serial.println(actual == on ? "  -> prikaz DOSIEL, stratila sa len odpoved"
+                              : "  -> prikaz vobec NEDOSIEL");
+  return false;
 }
 
 // Waveshare: coil 0x00FF ovlada naraz vsetky rele
@@ -74,7 +101,7 @@ bool setAll(bool on) {
 
 // Nacita skutocny stav priamo z modulu (nie to, co sme si pamatali)
 void printState() {
-  if (!ModbusRTUClient.requestFrom(SLAVE_ID, COILS, 0, CHANNELS)) {
+  if (!readState()) {
     Serial.print("citanie stavu CHYBA: ");
     const char* err = ModbusRTUClient.lastError();
     Serial.println(err ? err : "(neznama)");
@@ -82,10 +109,8 @@ void printState() {
   }
   Serial.print("stav z modulu: ");
   for (int i = 0; i < CHANNELS; i++) {
-    bool on = ModbusRTUClient.read() != 0;
-    state[i] = on;
     Serial.print(i + 1);
-    Serial.print(on ? ":ZAP " : ":vyp ");
+    Serial.print(state[i] ? ":ZAP " : ":vyp ");
   }
   Serial.println();
 }
