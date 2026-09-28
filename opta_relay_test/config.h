@@ -19,7 +19,7 @@
 #define SCANBAUD_MAX_ID      16      // `scanbaud` skúša adresy 1..SCANBAUD_MAX_ID
 
 #define RELAY_MODULE_ID      1       // Modbus adresa (slave ID) relé modulu
-#define RELAY_MODULE_COUNT   9       // počet kanálov; `probe` ho zistí a prepíše
+#define RELAY_MODULE_COUNT   8       // počet kanálov; `probe` ho overí
 #define MAX_EXT_CHANNELS     32      // horný limit (Waveshare má verzie do 32 ch)
 #define RELAY_COIL_OFFSET    0       // adresa coilu pre kanál 1 (Waveshare = 0)
 
@@ -85,5 +85,4 @@ const char* const EXT_RELAY_NAMES[] = {
   "?",  // X6
   "?",  // X7
   "?",  // X8
-  "?",  // X9
 };
