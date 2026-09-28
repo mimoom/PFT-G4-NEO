@@ -75,11 +75,21 @@ bool setRelay(int channel, bool on) {
     return false;
   }
 
-  bool actual = state[channel - 1];
-  Serial.print("rele je ");
-  Serial.print(actual ? "ZAP" : "VYP");
-  Serial.println(actual == on ? "  -> prikaz DOSIEL, stratila sa len odpoved"
-                              : "  -> prikaz vobec NEDOSIEL");
+  if (state[channel - 1] == on) {
+    // Prikaz dosiel, iba odpoved sa stratila. Stav je overeny citanim,
+    // takze to nie je chyba – len sme o odpoved prisli.
+    Serial.println("rele je v cielovom stave -> prikaz presiel, "
+                   "stratila sa len odpoved");
+    return true;
+  }
+
+  Serial.println("rele je nezmenene -> prikaz vobec NEDOSIEL, skusam znovu");
+  if (ModbusRTUClient.coilWrite(SLAVE_ID, channel - 1, on ? 1 : 0)) {
+    state[channel - 1] = on;
+    Serial.println("   druhy pokus: OK");
+    return true;
+  }
+  Serial.println("   druhy pokus tiez zlyhal");
   return false;
 }
 

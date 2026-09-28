@@ -92,6 +92,36 @@ a riadi sa tým, čo hlási hardvér. Ak vypíše iné číslo, než máš v con
 prepíš `RELAY_MODULE_COUNT` na hlásenú hodnotu. Ručne sa dá nastaviť aj
 príkazom `count <n>`.
 
+## Modul
+
+**Waveshare Industrial Modbus RTU 8-ch Relay Module, RS485, multi
+isolation** — základná verzia, napájanie **5 V** (verzie *(B)* a *(D)*
+majú 7–36 V, táto nie).
+
+| Parameter | Hodnota |
+|---|---|
+| Napájanie | 5 V |
+| Odber v pokoji | 0,18 W ≈ 36 mA |
+| Odber so všetkými relé | 2,9 W ≈ **580 mA** |
+| Jedna cievka | ~68 mA navyše |
+| Kontakty | 10 A 250 V AC / 30 V DC |
+| Z výroby | 9600 8N1, adresa 1 |
+
+Zdroj musí utiahnuť aspoň **1 A** a vodiče majú byť krátke a hrubé.
+RS485 je na module *izolovaný* a jeho vysielač je napájaný cez DC-DC
+z tej istej 5 V vetvy ako cievky — keď zopnutie cievky stiahne napätie,
+modul nestihne odpovedať a zápis skončí na timeout, hoci relé zoplo.
+
+Príznak je typický: **čítanie ide spoľahlivo, vypnutie relé ide,
+zapnutie hádže timeout.** Pomáha:
+
+- silnejší 5 V zdroj a kratšie vodiče
+- elektrolytický kondenzátor 470–1000 µF priamo na svorkách 5 V/GND
+- viesť RS485 pár ďalej od relé časti
+
+Skica si po zlyhanom zápise načíta skutočný stav, takže stratenú
+odpoveď rozozná od nedoručeného príkazu a zbytočne nehlási chybu.
+
 ## Časovanie RS485 — dôležité
 
 Vzorec z oficiálneho Arduino príkladu pre Optu
