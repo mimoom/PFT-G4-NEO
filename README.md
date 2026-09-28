@@ -13,6 +13,7 @@ opta_relay_test/    plná konzola: mapovanie, vstupy, diagnostika
   MAPOVANIE.md        tabuľky na zapísanie, čo je na čo zapojené
 opta_rs485_tune/    merač časovania RS485
 opta_fix_test/      dôkaz príčiny orezaných rámcov
+opta_web/           ovládanie cez Ethernet (web + JSON API)
 KOMUNIKACIA.md      ako funguje Modbus RTU na tejto linke
 ```
 
@@ -168,9 +169,59 @@ to, čo príde späť. Podľa výsledku vieš, kde hľadať:
 > mb rh 1 0x8000 1         verzia firmvéru
 ```
 
-## Ďalší krok – sieť
+## Sieť – ovládanie cez Ethernet
 
-Príkazy sú spracované v jedinej funkcii `handleCommand(line, out)`, ktorá
-píše do ľubovoľného `Print`. Na HTTP/MQTT ovládanie stačí tú istú funkciu
-zavolať s telom požiadavky a výstup nechať tiecť do odpovede – logika
-relé sa nemusí duplikovať.
+`opta_web/` pridáva k RS485 ešte webové rozhranie. Opta má RJ45, netreba
+nič dokupovať. Po štarte vypíše do Serial Monitora svoju adresu:
+
+```
+Ethernet: pripojeny (DHCP)
+>>> otvor http://192.168.88.57/
+```
+
+Stránka má osem tlačidiel a obnovuje sa každé 3 sekundy. Funguje aj
+z mobilu.
+
+### API
+
+Volateľné z Home Assistant, Node-RED alebo `curl`:
+
+| Požiadavka | Čo urobí |
+|---|---|
+| `GET /api/state` | stav všetkých relé ako JSON |
+| `GET /api/relay?ch=3&v=on` | zapne relé 3 (`v` = `on`, `off`, `toggle`) |
+| `GET /api/alloff` | vypne všetky |
+
+Odpoveď je vždy rovnaká:
+
+```json
+{"ok":true,"relays":[0,1,0,0,0,0,0,0]}
+```
+
+`ok` hovorí, či modul na RS485 odpovedal. Stav sa po každom zápise
+načíta z modulu, takže JSON nikdy nie je iba domnienka.
+
+### Pevná IP
+
+DHCP je predvolené. Keď chceš poznať adresu dopredu, v skici nastav
+`USE_STATIC_IP = true` a uprav adresy nad tým (prednastavené pre sieť
+`192.168.88.x`). Zvolená adresa musí byť mimo rozsahu, ktorý rozdáva
+DHCP, inak ju router raz pridelí niekomu inému.
+
+### Bezpečnosť
+
+Server **nemá žiadne overovanie**, kým nevyplníš `API_KEY`. Ovláda
+kontakty na 10 A, takže:
+
+- v inej než domácej sieti `API_KEY` vyplň (potom sa ku každej
+  požiadavke pridáva `&key=...`, stránka to rieši sama cez `?key=` v URL)
+- **nesmeruj naň port z internetu.** Na prístup zvonku použi VPN do tej
+  siete; presmerovanie portu vystaví relé celému internetu.
+- HTTP nie je šifrované, heslo ide po sieti čitateľné — v rámci LAN to
+  stačí, cez internet nie
+
+### Ďalší krok
+
+Na integráciu s domácou automatizáciou je prirodzenejší MQTT: Opta by sa
+hlásila brokeru sama a odpadlo by dopytovanie. To isté API sa dá doplniť
+bez zásahu do logiky relé.
