@@ -13,7 +13,9 @@ opta_relay_test/    plná konzola: mapovanie, vstupy, diagnostika
   MAPOVANIE.md        tabuľky na zapísanie, čo je na čo zapojené
 opta_rs485_tune/    merač časovania RS485
 opta_fix_test/      dôkaz príčiny orezaných rámcov
-opta_web/           ovládanie cez Ethernet (web + JSON API)
+opta_web/           ovládanie cez Ethernet (web + JSON API, LAN)
+opta_client/        hlási stavy všetkých 12 relé na server
+server/             serverová apka (Docker) + dashboard
 KOMUNIKACIA.md      ako funguje Modbus RTU na tejto linke
 ```
 
@@ -168,6 +170,19 @@ to, čo príde späť. Podľa výsledku vieš, kde hľadať:
 > mb rh 1 0x4000 1         adresa zariadenia
 > mb rh 1 0x8000 1         verzia firmvéru
 ```
+
+## Dva spôsoby siete
+
+| | `opta_web/` | `opta_client/` + `server/` |
+|---|---|---|
+| Kto je server | Opta | samostatný server |
+| Dosah | len tá istá sieť | odkiaľkoľvek |
+| Treba otvárať port k Opte | áno | **nie** |
+| Ovládanie | áno | zatiaľ len zobrazenie stavov |
+
+Na prácu v dielni stačí `opta_web`. Na prístup z inej siete je správne
+`opta_client` + `server` — Opta sa hlási sama, takže sa k nej nemusí
+nikto dostať zvonku. Podrobnosti v [server/README.md](server/README.md).
 
 ## Sieť – ovládanie cez Ethernet
 

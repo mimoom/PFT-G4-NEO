@@ -1,0 +1,13 @@
+{
+  "name": "pft-relay-server",
+  "version": "1.0.0",
+  "description": "Zber stavov relé z Arduino Opta a dashboard",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

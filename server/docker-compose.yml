@@ -1,0 +1,16 @@
+services:
+  relay-server:
+    build: .
+    container_name: pft-relay-server
+    restart: unless-stopped
+    # Kým je to len v lokálnej sieti, stačí takto. Keď pribudne doména,
+    # daj pred to reverzné proxy s HTTPS (pozri README).
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - relay-data:/data
+
+volumes:
+  relay-data:
